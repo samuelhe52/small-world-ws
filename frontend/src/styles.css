@@ -150,6 +150,8 @@ button, input { font: inherit; }
 .axis-label { font-size: 12px; }
 .axis-l { fill: var(--blue); }
 .axis-c { fill: var(--orange); }
+.baseline-label { fill: var(--blue); font-size: 11px; font-weight: 650; }
+.baseline-dot { stroke: #fff; stroke-width: 2; }
 .line { fill: none; stroke-width: 2.4; stroke-linejoin: round; stroke-linecap: round; }
 .line-l { stroke: var(--blue); }
 .line-c { stroke: var(--orange); }
