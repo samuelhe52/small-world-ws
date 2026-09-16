@@ -15,7 +15,14 @@ function PhaseRow({ phase, index }: { phase: PhaseView; index: number }) {
         <strong>{phase.label}</strong>
         <span>{phase.detail}</span>
       </div>
-      <div className="phase-meter" aria-label={`${phase.label} progress`}>
+      <div
+        className="phase-meter"
+        role="progressbar"
+        aria-label={`${phase.label} progress`}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={phase.progress * 100}
+      >
         <div style={{ width: `${phase.progress * 100}%` }} />
       </div>
       <div className="phase-meta">
@@ -26,9 +33,16 @@ function PhaseRow({ phase, index }: { phase: PhaseView; index: number }) {
   );
 }
 
-function WorkerActivity({ bfs, workers }: { bfs: BfsView | null; workers: number }) {
+function WorkerActivity({ bfs, workers, active }: {
+  bfs: BfsView | null;
+  workers: number;
+  active: boolean;
+}) {
   const frontiers = bfs?.frontierByWorker ?? Array.from({ length: workers }, () => 0);
   const max = Math.max(...frontiers, 1);
+  let status = "Waiting for BFS phase";
+  if (bfs?.method === "ring") status = "Exact ring distances";
+  else if (bfs) status = active ? "Exchanging frontier" : "Complete";
   return (
     <section className="bfs-status" aria-labelledby="bfs-status-title">
       <div className="bfs-status-heading">
@@ -38,9 +52,24 @@ function WorkerActivity({ bfs, workers }: { bfs: BfsView | null; workers: number
           <i />
           <span>Level {bfs?.level ?? "—"}</span>
           <i />
-          <span>{bfs ? "Exchanging frontier" : "Waiting for BFS phase"}</span>
+          <span>{status}</span>
         </div>
       </div>
+      {bfs ? (
+        <div className="source-progress">
+          <div>
+            <span>Current source: {bfs.visitedNodes.toLocaleString()} / {bfs.totalNodes.toLocaleString()} vertices reached</span>
+            <strong>{Math.round(bfs.sourceProgress * 100)}%</strong>
+          </div>
+          <progress aria-label="Current BFS source progress" max={1} value={bfs.sourceProgress} />
+        </div>
+      ) : null}
+      <p className="worker-chart-explanation">
+        Each lane is one worker. Its blue bars show the size of that worker’s current BFS frontier
+        relative to the busiest worker at this level; they indicate live traversal activity, not a
+        history, CPU utilization, or total work completed. The p=0 baseline uses exact ring distances
+        and has no BFS frontier.
+      </p>
       <div className="worker-grid">
         {frontiers.map((frontier, index) => {
           const ratio = frontier / max;
@@ -50,11 +79,10 @@ function WorkerActivity({ bfs, workers }: { bfs: BfsView | null; workers: number
               <span>{frontier.toLocaleString()} nodes in frontier</span>
               <div className="activity-bars" aria-hidden="true">
                 {Array.from({ length: 11 }, (_, bar) => {
-                  const profile = 0.28 + Math.abs(Math.sin((bar + 1) * (index + 2))) * 0.72;
                   return (
                     <i
                       key={bar}
-                      style={{ height: `${10 + 42 * profile * Math.max(ratio, 0.08)}px` }}
+                      style={{ height: `${52 * ratio}px` }}
                     />
                   );
                 })}
@@ -82,7 +110,11 @@ export function ProgressPanel({ phases, bfs, workers }: Props) {
           <PhaseRow key={phase.key} phase={phase} index={index} />
         ))}
       </div>
-      <WorkerActivity bfs={bfs} workers={workers} />
+      <WorkerActivity
+        bfs={bfs}
+        workers={workers}
+        active={phases.some((phase) => phase.key === "bfs" && phase.status === "active")}
+      />
     </main>
   );
 }

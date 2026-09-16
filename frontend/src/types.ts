@@ -22,8 +22,18 @@ export interface PhaseView {
 export interface BfsView {
   sourceIndex: number;
   sourceTotal: number;
-  level: number;
+  level: number | null;
   frontierByWorker: number[];
+  visitedNodes: number;
+  totalNodes: number;
+  sourceProgress: number;
+  method: "bfs" | "ring";
+}
+
+export interface SweepProgress {
+  index: number;
+  total: number;
+  probability: number;
 }
 
 export interface RunResults {

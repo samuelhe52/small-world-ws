@@ -86,8 +86,37 @@ pub struct PhaseView {
 pub struct BfsView {
     pub source_index: u32,
     pub source_total: u32,
-    pub level: u32,
+    pub level: Option<u32>,
     pub frontier_by_worker: Vec<u64>,
+    pub visited_nodes: u64,
+    pub total_nodes: u32,
+    pub source_progress: f64,
+    pub method: &'static str,
+}
+
+fn source_progress(visited: u64, nodes: u32, complete: bool) -> f64 {
+    if complete {
+        return 1.0;
+    }
+    visited.saturating_sub(1) as f64 / f64::from(nodes - 1)
+}
+
+async fn update_bfs(state: &SharedDashboardState, bfs: BfsView, started: Instant) {
+    let mut dashboard = state.write().await;
+    if let Some(phase) = dashboard.phases.iter_mut().find(|phase| phase.key == "bfs") {
+        phase.progress =
+            (f64::from(bfs.source_index - 1) + bfs.source_progress) / f64::from(bfs.source_total);
+        let traversal = bfs.level.map_or_else(
+            || "exact ring distances".to_owned(),
+            |level| format!("level {level}"),
+        );
+        phase.detail = format!(
+            "Source {} of {}; {traversal}; {} / {} vertices reached",
+            bfs.source_index, bfs.source_total, bfs.visited_nodes, bfs.total_nodes
+        );
+        phase.elapsed_ms = started.elapsed().as_millis() as u64;
+    }
+    dashboard.current_bfs = Some(bfs);
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -544,6 +573,48 @@ pub async fn run_distributed(state: SharedDashboardState, config: RunConfig) -> 
     let mut vertices_visited = 0u64;
 
     for (source_index, source) in sources.into_iter().enumerate() {
+        if config.probability == 0.0 {
+            let responses = request_all(
+                &mut workers,
+                (0..config.workers)
+                    .map(|_| WorkerCommand::RingDistances {
+                        source: source as u32,
+                    })
+                    .collect(),
+            )
+            .await?;
+            let mut visited = 0u64;
+            for response in responses {
+                let WorkerResponse::RingDistances {
+                    distance_sum,
+                    reachable,
+                    visited: local_visited,
+                } = response
+                else {
+                    return Err("unexpected ring distance response".to_owned());
+                };
+                total_distance += distance_sum;
+                total_reachable += reachable;
+                visited += local_visited;
+            }
+            vertices_visited += visited;
+            update_bfs(
+                &state,
+                BfsView {
+                    source_index: source_index as u32 + 1,
+                    source_total: config.bfs_samples,
+                    level: None,
+                    frontier_by_worker: vec![0; workers.len()],
+                    visited_nodes: visited,
+                    total_nodes: config.nodes,
+                    source_progress: 1.0,
+                    method: "ring",
+                },
+                phase_started,
+            )
+            .await;
+            continue;
+        }
         request_all(
             &mut workers,
             (0..config.workers)
@@ -617,29 +688,23 @@ pub async fn run_distributed(state: SharedDashboardState, config: RunConfig) -> 
                 frontier_by_worker.push(frontier);
                 visited_this_source += visited;
             }
-            {
-                let mut dashboard = state.write().await;
-                dashboard.current_bfs = Some(BfsView {
+            let complete = frontier_by_worker.iter().sum::<u64>() == 0;
+            update_bfs(
+                &state,
+                BfsView {
                     source_index: source_index as u32 + 1,
                     source_total: config.bfs_samples,
-                    level: level + 1,
-                    frontier_by_worker: frontier_by_worker.clone(),
-                });
-            }
-            update_phase(
-                &state,
-                "bfs",
-                source_index as f64 / config.bfs_samples as f64,
-                format!(
-                    "Source {} of {}; level {}",
-                    source_index + 1,
-                    config.bfs_samples,
-                    level + 1
-                ),
+                    level: Some(level + 1),
+                    frontier_by_worker,
+                    visited_nodes: visited_this_source,
+                    total_nodes: config.nodes,
+                    source_progress: source_progress(visited_this_source, config.nodes, complete),
+                    method: "bfs",
+                },
                 phase_started,
             )
             .await;
-            if frontier_by_worker.iter().sum::<u64>() == 0 {
+            if complete {
                 vertices_visited += visited_this_source;
                 break;
             }
@@ -683,7 +748,15 @@ pub async fn run_distributed(state: SharedDashboardState, config: RunConfig) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::{RunConfig, system_worker_limit};
+    use super::{RunConfig, source_progress, system_worker_limit};
+
+    #[test]
+    fn progress_advances_within_a_source_and_completes_disconnected_sources() {
+        assert_eq!(source_progress(1, 101, false), 0.0);
+        assert_eq!(source_progress(51, 101, false), 0.5);
+        assert_eq!(source_progress(101, 101, true), 1.0);
+        assert_eq!(source_progress(20, 101, true), 1.0);
+    }
 
     #[test]
     fn accepts_node_counts_above_the_previous_demo_cap() {

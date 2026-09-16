@@ -64,7 +64,7 @@ presenting it as an exact all-vertex result.
 
 ## Level-synchronous distributed BFS
 
-Every sampled source runs one collective BFS across all workers:
+For rewired graphs, every sampled source runs one collective BFS across all workers:
 
 ```text
 start source
@@ -80,6 +80,7 @@ global frontier/termination check
 ```
 
 Each worker owns its local visited bitmap, current frontier, and next frontier.
+It maintains a running visited count rather than rescanning the bitmap at each level.
 It never reads another worker's adjacency. The coordinator sums accepted
 discoveries at level `d` to accumulate the distance contribution `d * count`.
 When every worker reports an empty next frontier, that source is complete.
@@ -87,6 +88,13 @@ When every worker reports an empty next frontier, that source is complete.
 Sources are uniform samples without replacement. They execute sequentially
 because every BFS uses the full worker cluster; the expensive expansion inside
 each level runs concurrently in all worker processes.
+
+For `p=0`, workers compute exact distances from each sampled source to their own
+vertices in the intact ring: `ceil(min(|u-s|, N-|u-s|) / (K/2))`. This preserves
+the sampled sources, distance denominator, and worker ownership, while avoiding
+one synchronization round per ring level. Workers reject this shortcut after
+their adjacency has been mutated. The dashboard labels this as exact ring
+distances rather than displaying a simulated BFS frontier.
 
 ## Dashboard and progress
 
@@ -100,6 +108,9 @@ The React frontend polls status every 400 ms. While a run is active, controls
 are disabled, the worker count reflects live child processes, phase progress is
 updated, and per-worker frontier sizes drive the activity lanes. Run history is
 kept in server memory and resets when the server restarts.
+During BFS, progress includes vertices reached within the current source;
+disconnected sources count as complete when their frontier empties. The UI also
+shows current-source progress and the active experiment's position in a p sweep.
 
 ## Reference run
 
@@ -130,4 +141,3 @@ The timing is a local reference, not a portable performance guarantee.
 These boundaries keep the demo understandable while retaining the essential
 properties the earlier Rayon implementation lacked: isolated shard storage,
 explicit cross-shard messages, and collective distributed BFS.
-

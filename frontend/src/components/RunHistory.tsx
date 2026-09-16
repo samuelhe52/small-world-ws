@@ -6,11 +6,11 @@ function duration(milliseconds: number): string {
 }
 
 export function RunHistory({ history }: { history: RunRecord[] }) {
-  const rows = [...history].reverse().slice(0, 6);
+  const rows = [...history].reverse();
   return (
     <section className="panel history-panel" aria-labelledby="history-title">
       <h2 id="history-title">Run history</h2>
-      <div className="history-scroll">
+      <div className="history-scroll" role="region" aria-label="Scrollable run history" tabIndex={0}>
         <table>
           <thead>
             <tr>

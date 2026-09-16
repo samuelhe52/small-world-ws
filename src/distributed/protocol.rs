@@ -38,6 +38,7 @@ pub enum WorkerCommand {
     PrepareClustering { vertices: Vec<u32> },
     ResolveEdgeQueries(Vec<EdgeQuery>),
     StartBfs { source: u32 },
+    RingDistances { source: u32 },
     ExpandBfs,
     ApplyDiscoveries(Vec<u32>),
     AdvanceBfs,
@@ -77,6 +78,11 @@ pub enum WorkerResponse {
         counts: Vec<(u32, u64)>,
     },
     BfsStarted,
+    RingDistances {
+        distance_sum: u64,
+        reachable: u64,
+        visited: u64,
+    },
     BfsExpanded {
         local_discovered: u64,
         discoveries_by_owner: Vec<Vec<u32>>,

@@ -34,6 +34,8 @@ pub struct Worker {
     end: u32,
     adjacency: Vec<Vec<u32>>,
     visited: Vec<bool>,
+    visited_count: u64,
+    ring_intact: bool,
     frontier: Vec<u32>,
     next_frontier: Vec<u32>,
 }
@@ -47,6 +49,8 @@ impl Worker {
             end: 0,
             adjacency: Vec::new(),
             visited: Vec::new(),
+            visited_count: 0,
+            ring_intact: false,
             frontier: Vec::new(),
             next_frontier: Vec::new(),
         }
@@ -120,6 +124,8 @@ impl Worker {
         self.start = start;
         self.end = end;
         self.visited = vec![false; adjacency.len()];
+        self.visited_count = 0;
+        self.ring_intact = true;
         self.adjacency = adjacency;
         self.frontier.clear();
         self.next_frontier.clear();
@@ -167,6 +173,12 @@ impl Worker {
         output: &mut W,
     ) -> Result<WorkerResponse, String> {
         let config = self.config()?;
+        if probability == 0.0 {
+            return Ok(WorkerResponse::Rewired {
+                considered: u64::from(self.end - self.start) * u64::from(config.degree / 2),
+                rewired: 0,
+            });
+        }
         let mut mutations_by_owner = vec![Vec::new(); config.workers as usize];
         let half = config.degree / 2;
         let mut considered = 0u64;
@@ -225,6 +237,7 @@ impl Worker {
                     }
                 }
                 rewired += 1;
+                self.ring_intact = false;
             }
         }
 
@@ -251,6 +264,7 @@ impl Worker {
                 mutation.node, mutation.other, mutation.add
             ));
         }
+        self.ring_intact = false;
         Ok(())
     }
 
@@ -338,14 +352,42 @@ impl Worker {
     fn start_bfs(&mut self, source: u32) -> Result<WorkerResponse, String> {
         let config = self.config()?;
         self.visited.fill(false);
+        self.visited_count = 0;
         self.frontier.clear();
         self.next_frontier.clear();
         if owner(source, config.nodes, config.workers) == self.id {
             let index = self.local_index(source)?;
             self.visited[index] = true;
+            self.visited_count = 1;
             self.frontier.push(source);
         }
         Ok(WorkerResponse::BfsStarted)
+    }
+
+    fn ring_distances(&self, source: u32) -> Result<WorkerResponse, String> {
+        let config = self.config()?;
+        if !self.ring_intact || source >= config.nodes || config.degree < 2 {
+            return Err("ring distances require an intact ring and a valid source".to_owned());
+        }
+        let half = u64::from(config.degree / 2);
+        let nodes = u64::from(config.nodes);
+        let mut distance_sum = 0u64;
+        let mut reachable = 0u64;
+        // On the original ring, an edge advances at most K/2 positions.
+        // The shortest path is ceil(shorter cyclic separation / (K/2)).
+        for node in self.start..self.end {
+            if node == source {
+                continue;
+            }
+            let separation = u64::from(node.abs_diff(source));
+            distance_sum += separation.min(nodes - separation).div_ceil(half);
+            reachable += 1;
+        }
+        Ok(WorkerResponse::RingDistances {
+            distance_sum,
+            reachable,
+            visited: u64::from(self.end - self.start),
+        })
     }
 
     fn expand_bfs(&mut self) -> Result<WorkerResponse, String> {
@@ -373,6 +415,7 @@ impl Worker {
             discoveries.sort_unstable();
             discoveries.dedup();
         }
+        self.visited_count += local_discovered;
         Ok(WorkerResponse::BfsExpanded {
             local_discovered,
             discoveries_by_owner,
@@ -389,6 +432,7 @@ impl Worker {
                 accepted += 1;
             }
         }
+        self.visited_count += accepted;
         Ok(WorkerResponse::DiscoveriesApplied { accepted })
     }
 
@@ -397,7 +441,7 @@ impl Worker {
         std::mem::swap(&mut self.frontier, &mut self.next_frontier);
         WorkerResponse::BfsAdvanced {
             frontier: self.frontier.len() as u64,
-            visited: self.visited.iter().filter(|visited| **visited).count() as u64,
+            visited: self.visited_count,
         }
     }
 
@@ -418,6 +462,7 @@ impl Worker {
             }
             WorkerCommand::ResolveEdgeQueries(queries) => self.resolve_edge_queries(queries),
             WorkerCommand::StartBfs { source } => self.start_bfs(source),
+            WorkerCommand::RingDistances { source } => self.ring_distances(source),
             WorkerCommand::ExpandBfs => self.expand_bfs(),
             WorkerCommand::ApplyDiscoveries(discoveries) => self.apply_discoveries(discoveries),
             WorkerCommand::AdvanceBfs => Ok(self.advance_bfs()),
@@ -478,6 +523,99 @@ mod tests {
         let size = bincode::serialized_size(response).unwrap() as usize;
         assert!(size < 1024 * 1024);
         assert!(size < MAX_FRAME_BYTES);
+    }
+
+    #[test]
+    fn ring_distances_match_bfs_and_visited_counts_reset_between_sources() {
+        for (nodes, degree, count) in [(19, 2, 3), (20, 4, 3), (31, 10, 4), (103, 100, 4)] {
+            let mut workers = build_workers(nodes, degree, count);
+            for source in [0, nodes / 2, nodes - 1] {
+                let expected_distance: u64 = workers
+                    .iter()
+                    .map(|worker| {
+                        let WorkerResponse::RingDistances {
+                            distance_sum,
+                            reachable,
+                            visited,
+                        } = worker.ring_distances(source).unwrap()
+                        else {
+                            panic!("expected ring distances")
+                        };
+                        assert_eq!(visited, u64::from(worker.end - worker.start));
+                        assert_eq!(
+                            reachable,
+                            visited - u64::from(source >= worker.start && source < worker.end)
+                        );
+                        distance_sum
+                    })
+                    .sum();
+                for worker in &mut workers {
+                    worker.start_bfs(source).unwrap();
+                }
+                let mut distance_sum = 0u64;
+                for level in 1..=nodes {
+                    let mut routed = vec![Vec::new(); count as usize];
+                    let mut discovered = 0u64;
+                    for worker in &mut workers {
+                        let WorkerResponse::BfsExpanded {
+                            local_discovered,
+                            discoveries_by_owner,
+                        } = worker.expand_bfs().unwrap()
+                        else {
+                            panic!("expected expansion")
+                        };
+                        discovered += local_discovered;
+                        for (target, discoveries) in discoveries_by_owner.into_iter().enumerate() {
+                            routed[target].extend(discoveries);
+                        }
+                    }
+                    for (worker, mut discoveries) in workers.iter_mut().zip(routed) {
+                        // Duplicated remote messages must not inflate the counter.
+                        discoveries.extend(discoveries.clone());
+                        let WorkerResponse::DiscoveriesApplied { accepted } =
+                            worker.apply_discoveries(discoveries).unwrap()
+                        else {
+                            panic!("expected discoveries")
+                        };
+                        discovered += accepted;
+                    }
+                    distance_sum += discovered * u64::from(level);
+                    let mut frontier_total = 0u64;
+                    let mut visited_total = 0u64;
+                    for worker in &mut workers {
+                        let WorkerResponse::BfsAdvanced { frontier, visited } =
+                            worker.advance_bfs()
+                        else {
+                            panic!("expected frontier")
+                        };
+                        assert_eq!(
+                            visited,
+                            worker.visited.iter().filter(|&&value| value).count() as u64
+                        );
+                        frontier_total += frontier;
+                        visited_total += visited;
+                    }
+                    if frontier_total == 0 {
+                        assert_eq!(visited_total, u64::from(nodes));
+                        break;
+                    }
+                }
+                assert_eq!(distance_sum, expected_distance);
+            }
+        }
+    }
+
+    #[test]
+    fn ring_distances_reject_mutated_graphs() {
+        let mut workers = build_workers(20, 4, 1);
+        workers[0]
+            .apply_one_mutation(Mutation {
+                node: 0,
+                other: 1,
+                add: false,
+            })
+            .unwrap();
+        assert!(workers[0].ring_distances(0).is_err());
     }
 
     #[tokio::test]

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { RunConfig } from "../types";
+import type { RunConfig, SweepProgress } from "../types";
 
 interface Props {
   config: RunConfig;
@@ -7,6 +7,9 @@ interface Props {
   running: boolean;
   onChange: (config: RunConfig) => void;
   onRun: () => void;
+  onRunSweep: (step: number) => void;
+  sweepProgress: SweepProgress | null;
+  experimentProgress: number;
 }
 
 interface NumberFieldProps {
@@ -72,7 +75,17 @@ function NumberField({ label, ...inputProps }: NumberFieldProps) {
   );
 }
 
-export function ConfigurationPanel({ config, workerLimit, running, onChange, onRun }: Props) {
+export function ConfigurationPanel({
+  config,
+  workerLimit,
+  running,
+  onChange,
+  onRun,
+  onRunSweep,
+  sweepProgress,
+  experimentProgress,
+}: Props) {
+  const [sweepStep, setSweepStep] = useState(0.1);
   const update = <K extends keyof RunConfig>(key: K, value: RunConfig[K]) => {
     onChange({ ...config, [key]: value });
   };
@@ -117,6 +130,7 @@ export function ConfigurationPanel({ config, workerLimit, running, onChange, onR
           className="range"
           type="range"
           value={config.probability}
+          style={{ background: `linear-gradient(to right, var(--blue) ${config.probability * 100}%, #dbe2ec ${config.probability * 100}%)` }}
           min={0}
           max={1}
           step={0.001}
@@ -151,6 +165,35 @@ export function ConfigurationPanel({ config, workerLimit, running, onChange, onR
         {running ? <span className="spinner" aria-hidden="true" /> : null}
         {running ? "Running…" : "Run experiment"}
       </button>
+      <div className="sweep-control">
+        <label htmlFor="sweep-step">p sweep step</label>
+        <DraftNumberInput
+          id="sweep-step"
+          className="sweep-step-input"
+          value={sweepStep}
+          min={0.001}
+          max={1}
+          step={0.001}
+          disabled={running}
+          onChange={setSweepStep}
+        />
+        <button
+          className="sweep-button"
+          type="button"
+          disabled={running || !Number.isFinite(sweepStep) || sweepStep <= 0 || sweepStep > 1}
+          onClick={() => onRunSweep(sweepStep)}
+        >
+          Run p sweep (0–1)
+        </button>
+        {sweepProgress ? (
+          <div className="sweep-progress" role="status">
+            <span>Experiment {sweepProgress.index} of {sweepProgress.total} · p={sweepProgress.probability}</span>
+            <span>This experiment: {Math.round(experimentProgress * 100)}%</span>
+            <progress aria-label="p sweep progress" max={sweepProgress.total}
+              value={sweepProgress.index - 1 + experimentProgress} />
+          </div>
+        ) : null}
+      </div>
       <p className="configuration-note">
         Each worker is a separate OS process and stores only its assigned node range. This system
         allows up to {workerLimit} worker {workerLimit === 1 ? "process" : "processes"}.
