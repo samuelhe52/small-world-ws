@@ -724,30 +724,48 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
-name = "small-world-core"
-version = "0.1.0"
-dependencies = [
- "rand",
- "rand_chacha",
- "rayon",
-]
-
-[[package]]
-name = "small-world-ws"
+name = "small-world-app"
 version = "0.1.0"
 dependencies = [
  "axum",
- "bincode",
+ "serde",
+ "serde_json",
+ "small-world-distributed",
+ "tokio",
+ "tower-http",
+]
+
+[[package]]
+name = "small-world-cli"
+version = "0.1.0"
+dependencies = [
  "clap",
+ "rayon",
+ "small-world-app",
+ "small-world-distributed",
+ "small-world-threaded",
+ "tokio",
+]
+
+[[package]]
+name = "small-world-distributed"
+version = "0.1.0"
+dependencies = [
+ "bincode",
  "futures",
  "rand",
  "rand_chacha",
- "rayon",
  "serde",
- "serde_json",
- "small-world-core",
  "tokio",
- "tower-http",
+]
+
+[[package]]
+name = "small-world-threaded"
+version = "0.1.0"
+dependencies = [
+ "rand",
+ "rand_chacha",
+ "rayon",
 ]
 
 [[package]]

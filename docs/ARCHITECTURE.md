@@ -1,10 +1,25 @@
 # Distributed architecture
 
+## Workspace boundaries
+
+The multiprocess implementation is exposed by `small-world-distributed` as an
+experiment API with typed configuration, progress events, and results. Its
+engine coordinates process clients but does not know about HTTP or dashboard
+state. Internally, shard storage is separated from its rewiring, clustering,
+and BFS operations, and the stdin/stdout worker loop is a thin runtime adapter.
+
+`small-world-app` translates engine events into the dashboard's serialized
+state and serves the API and frontend. `small-world-cli` selects the threaded,
+server, or worker entry point. The separate `small-world-threaded` crate owns
+the complete-graph Rayon implementation; neither execution engine is presented
+as a common core for the other.
+
 ## Process and storage model
 
-The `serve` process launches `W` worker processes. It serves the HTTP API and
-static frontend, coordinates experiments, and collects progress. Each worker
-runs the hidden `worker --id i` command, where `i` identifies the worker.
+The `serve` process hosts the HTTP API and static frontend. For each experiment,
+the distributed engine launches `W` worker processes and reports progress to
+the app adapter. Each worker runs the hidden `worker --id i` command, where `i`
+identifies the worker.
 
 For a graph with `N` nodes and degree `K`, worker `i` owns the half-open range
 

@@ -1,14 +1,11 @@
 use clap::{Args, Parser, Subcommand};
 use rayon::ThreadPoolBuilder;
-use small_world_core::{
+use small_world_threaded::{
     average_clustering_parallel, exact_path_length, generate_ws_partitioned, sample_sources,
     sampled_path_length_parallel, sampled_path_length_sequential,
 };
 use std::error::Error;
 use std::time::{Duration, Instant};
-
-mod distributed;
-mod server;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -214,12 +211,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         Command::Serve(args) => tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?
-            .block_on(server::serve(&args.host, args.port)),
+            .block_on(small_world_app::serve(&args.host, args.port)),
         Command::Worker(args) => {
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()?
-                .block_on(distributed::worker::run_worker(args.id))?;
+                .block_on(small_world_distributed::run_worker(args.id))?;
             Ok(())
         }
     }

@@ -2,12 +2,14 @@
 
 Small World Lab is a browser demo of a partitioned Watts-Strogatz experiment. A
 Rust coordinator launches separate worker processes. Each worker stores
-adjacency lists only for its assigned node range. The coordinator stores
-progress metadata and no graph adjacency.
+adjacency lists only for its assigned node range. The coordinator routes work
+without holding graph adjacency, while the app adapter stores dashboard state.
 
-The reusable graph algorithms live in the `small-world-core` workspace crate.
-The native application owns the HTTP server and distributed worker runtime, so
-the core can later be wrapped independently for WebAssembly.
+The workspace separates its two execution models. `small-world-threaded` owns
+the in-process Rayon implementation, while `small-world-distributed` owns the
+multiprocess engine, shard algorithms, protocol, and worker runtime. The
+`small-world-app` crate adapts distributed progress to the dashboard and HTTP
+API, and `small-world-cli` provides the executable entry points.
 
 The dashboard lets you tune `N` (the number of nodes), `K` (the degree of each
 node), `p` (the rewiring probability), the number of BFS samples, and the
@@ -39,6 +41,18 @@ sources, and up to four worker processes. Node count has no artificial UI or
 application maximum (the transport uses 32-bit node IDs); worker count is
 limited to the processor parallelism reported by the host operating system.
 
+## Workspace layout
+
+| Crate | Responsibility |
+| --- | --- |
+| `small-world-threaded` | Complete in-process graph, Rayon generation, clustering, and sampled BFS |
+| `small-world-distributed` | Application-independent experiment API, coordinator, IPC protocol, and isolated shard algorithms |
+| `small-world-app` | Dashboard state adapter, Axum API, and static frontend hosting |
+| `small-world-cli` | `demo`, `accuracy`, `serve`, and internal `worker` commands |
+
+The distributed engine reports typed progress events and returns an experiment
+result. It has no dependency on the web server or dashboard state.
+
 ## What is actually distributed?
 
 - Every worker is a separate OS process with an isolated address space.
@@ -64,8 +78,8 @@ correctness details. See [the performance audit](docs/PERFORMANCE.md) and the
 ## Verification
 
 ```bash
-cargo test
-cargo clippy --all-targets -- -D warnings
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
 cd frontend && npm run build
 ```
 

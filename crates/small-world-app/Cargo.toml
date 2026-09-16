@@ -1,0 +1,12 @@
+[package]
+name = "small-world-app"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+axum.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+small-world-distributed = { path = "../small-world-distributed" }
+tokio.workspace = true
+tower-http.workspace = true

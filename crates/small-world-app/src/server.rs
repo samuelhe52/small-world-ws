@@ -1,11 +1,10 @@
-use crate::distributed::coordinator::{
-    DashboardState, RunConfig, SharedDashboardState, fail_run, prepare_run, run_distributed,
-};
+use crate::dashboard::{DashboardState, SharedDashboardState, prepare_run, run_experiment};
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use small_world_distributed::ExperimentConfig;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -18,7 +17,7 @@ async fn status(State(state): State<SharedDashboardState>) -> Json<DashboardStat
 
 async fn start_run(
     State(state): State<SharedDashboardState>,
-    Json(config): Json<RunConfig>,
+    Json(config): Json<ExperimentConfig>,
 ) -> impl IntoResponse {
     if let Err(error) = prepare_run(&state, config).await {
         return (
@@ -28,9 +27,7 @@ async fn start_run(
     }
     let run_state = state.clone();
     tokio::spawn(async move {
-        if let Err(error) = run_distributed(run_state.clone(), config).await {
-            fail_run(&run_state, error).await;
-        }
+        run_experiment(run_state, config).await;
     });
     (
         StatusCode::ACCEPTED,
@@ -41,6 +38,7 @@ async fn start_run(
 pub async fn serve(host: &str, port: u16) -> Result<(), Box<dyn std::error::Error>> {
     let state = Arc::new(RwLock::new(DashboardState::default()));
     let frontend = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
         .join("frontend")
         .join("dist");
     if !frontend.join("index.html").exists() {

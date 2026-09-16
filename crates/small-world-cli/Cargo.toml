@@ -1,0 +1,16 @@
+[package]
+name = "small-world-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "small-world-ws"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+rayon.workspace = true
+small-world-app = { path = "../small-world-app" }
+small-world-distributed = { path = "../small-world-distributed" }
+small-world-threaded = { path = "../small-world-threaded" }
+tokio.workspace = true

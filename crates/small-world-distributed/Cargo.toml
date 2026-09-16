@@ -1,0 +1,12 @@
+[package]
+name = "small-world-distributed"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bincode.workspace = true
+futures.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true
+serde.workspace = true
+tokio.workspace = true

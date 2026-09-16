@@ -1,6 +1,19 @@
-pub mod coordinator;
-pub mod protocol;
-pub mod worker;
+//! Multiprocess Watts-Strogatz execution with isolated graph shards.
+
+mod engine;
+mod model;
+mod process;
+mod protocol;
+mod runtime;
+mod sampling;
+mod shard;
+
+pub use engine::run;
+pub use model::{
+    BfsMethod, BfsProgress, ExperimentConfig, ExperimentResult, Phase, ProgressEvent,
+    ProgressReporter, system_worker_limit,
+};
+pub use runtime::run_worker;
 
 pub(crate) fn owner(node: u32, nodes: u32, workers: u32) -> usize {
     debug_assert!(node < nodes);

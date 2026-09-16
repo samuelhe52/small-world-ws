@@ -143,7 +143,7 @@ export function App() {
         <RunHistory history={dashboard?.history ?? []} />
       </div>
       <footer>
-        Graph adjacency lives only inside worker processes; the coordinator routes protocol messages and stores progress metadata.
+        Graph adjacency lives only inside worker processes; the distributed engine routes protocol messages, and the app server stores progress metadata.
       </footer>
     </div>
   );
