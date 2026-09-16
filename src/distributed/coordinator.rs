@@ -657,37 +657,27 @@ pub async fn run_distributed(state: SharedDashboardState, config: RunConfig) -> 
                 &mut workers,
                 routed
                     .into_iter()
-                    .map(WorkerCommand::ApplyDiscoveries)
-                    .collect(),
-            )
-            .await?;
-            for response in responses {
-                let WorkerResponse::DiscoveriesApplied { accepted } = response else {
-                    return Err("unexpected discovery response".to_owned());
-                };
-                newly_discovered += accepted;
-            }
-            if newly_discovered > 0 {
-                total_distance += newly_discovered * u64::from(level + 1);
-                total_reachable += newly_discovered;
-            }
-
-            let responses = request_all(
-                &mut workers,
-                (0..config.workers)
-                    .map(|_| WorkerCommand::AdvanceBfs)
+                    .map(WorkerCommand::FinishBfsLevel)
                     .collect(),
             )
             .await?;
             let mut frontier_by_worker = Vec::with_capacity(workers.len());
             let mut visited_this_source = 0u64;
             for response in responses {
-                let WorkerResponse::BfsAdvanced { frontier, visited } = response else {
-                    return Err("unexpected BFS advance response".to_owned());
+                let WorkerResponse::BfsLevelFinished {
+                    accepted,
+                    frontier,
+                    visited,
+                } = response
+                else {
+                    return Err("unexpected BFS level response".to_owned());
                 };
+                newly_discovered += accepted;
                 frontier_by_worker.push(frontier);
                 visited_this_source += visited;
             }
+            total_distance += newly_discovered * u64::from(level + 1);
+            total_reachable += newly_discovered;
             let complete = frontier_by_worker.iter().sum::<u64>() == 0;
             update_bfs(
                 &state,

@@ -35,6 +35,7 @@ pub struct Worker {
     adjacency: Vec<Vec<u32>>,
     visited: Vec<bool>,
     visited_count: u64,
+    remote_seen: Vec<u64>,
     ring_intact: bool,
     frontier: Vec<u32>,
     next_frontier: Vec<u32>,
@@ -50,6 +51,7 @@ impl Worker {
             adjacency: Vec::new(),
             visited: Vec::new(),
             visited_count: 0,
+            remote_seen: Vec::new(),
             ring_intact: false,
             frontier: Vec::new(),
             next_frontier: Vec::new(),
@@ -151,7 +153,7 @@ impl Worker {
         neighbors: &[u32],
         nodes: u32,
     ) -> Option<u32> {
-        if neighbors.len() + 2 >= nodes as usize {
+        if neighbors.len() + 1 >= nodes as usize {
             return None;
         }
         for _ in 0..64 {
@@ -352,6 +354,17 @@ impl Worker {
     fn start_bfs(&mut self, source: u32) -> Result<WorkerResponse, String> {
         let config = self.config()?;
         self.visited.fill(false);
+        // One bit per global vertex: send a remote discovery only once per
+        // source, rather than once per incident edge and again at later levels.
+        self.remote_seen.resize(
+            if config.workers > 1 {
+                (config.nodes as usize).div_ceil(64)
+            } else {
+                0
+            },
+            0,
+        );
+        self.remote_seen.fill(0);
         self.visited_count = 0;
         self.frontier.clear();
         self.next_frontier.clear();
@@ -371,18 +384,37 @@ impl Worker {
         }
         let half = u64::from(config.degree / 2);
         let nodes = u64::from(config.nodes);
-        let mut distance_sum = 0u64;
-        let mut reachable = 0u64;
-        // On the original ring, an edge advances at most K/2 positions.
-        // The shortest path is ceil(shorter cyclic separation / (K/2)).
-        for node in self.start..self.end {
-            if node == source {
-                continue;
+        // Sum ceil(d / half) over a contiguous interval of cyclic distances.
+        // Each shard answers in constant time, independent of its node count.
+        let ascending = |distance: u64| {
+            let q = distance / half;
+            let r = distance % half;
+            half * q * (q + 1) / 2 + r * (q + 1)
+        };
+        let total = 2 * ascending((nodes - 1) / 2)
+            + if nodes.is_multiple_of(2) {
+                (nodes / 2).div_ceil(half)
+            } else {
+                0
+            };
+        let prefix = |end: u64| {
+            if end == 0 {
+                0
+            } else if end <= nodes / 2 + 1 {
+                ascending(end - 1)
+            } else {
+                total - ascending(nodes - end)
             }
-            let separation = u64::from(node.abs_diff(source));
-            distance_sum += separation.min(nodes - separation).div_ceil(half);
-            reachable += 1;
-        }
+        };
+        let start = (u64::from(self.start) + nodes - u64::from(source)) % nodes;
+        let end = start + u64::from(self.end - self.start);
+        let distance_sum = if end <= nodes {
+            prefix(end) - prefix(start)
+        } else {
+            total - prefix(start) + prefix(end - nodes)
+        };
+        let reachable =
+            u64::from(self.end - self.start) - u64::from(source >= self.start && source < self.end);
         Ok(WorkerResponse::RingDistances {
             distance_sum,
             reachable,
@@ -407,13 +439,14 @@ impl Worker {
                         local_discovered += 1;
                     }
                 } else {
-                    discoveries_by_owner[target].push(v);
+                    let word = &mut self.remote_seen[v as usize / 64];
+                    let mask = 1u64 << (v % 64);
+                    if *word & mask == 0 {
+                        *word |= mask;
+                        discoveries_by_owner[target].push(v);
+                    }
                 }
             }
-        }
-        for discoveries in &mut discoveries_by_owner {
-            discoveries.sort_unstable();
-            discoveries.dedup();
         }
         self.visited_count += local_discovered;
         Ok(WorkerResponse::BfsExpanded {
@@ -466,6 +499,21 @@ impl Worker {
             WorkerCommand::ExpandBfs => self.expand_bfs(),
             WorkerCommand::ApplyDiscoveries(discoveries) => self.apply_discoveries(discoveries),
             WorkerCommand::AdvanceBfs => Ok(self.advance_bfs()),
+            WorkerCommand::FinishBfsLevel(discoveries) => {
+                let WorkerResponse::DiscoveriesApplied { accepted } =
+                    self.apply_discoveries(discoveries)?
+                else {
+                    unreachable!()
+                };
+                let WorkerResponse::BfsAdvanced { frontier, visited } = self.advance_bfs() else {
+                    unreachable!()
+                };
+                Ok(WorkerResponse::BfsLevelFinished {
+                    accepted,
+                    frontier,
+                    visited,
+                })
+            }
             WorkerCommand::Shutdown => Ok(WorkerResponse::Ack),
         }
     }
@@ -523,6 +571,72 @@ mod tests {
         let size = bincode::serialized_size(response).unwrap() as usize;
         assert!(size < 1024 * 1024);
         assert!(size < MAX_FRAME_BYTES);
+    }
+
+    #[test]
+    fn ring_prefix_matches_enumeration_for_every_shard_and_source() {
+        for nodes in 3..40 {
+            for degree in (2..nodes).step_by(2) {
+                for worker in build_workers(nodes, degree, 4) {
+                    for source in 0..nodes {
+                        let expected: u64 = (worker.start..worker.end)
+                            .map(|v| {
+                                let d = v.abs_diff(source);
+                                u64::from(d.min(nodes - d).div_ceil(degree / 2))
+                            })
+                            .sum();
+                        let WorkerResponse::RingDistances { distance_sum, .. } =
+                            worker.ring_distances(source).unwrap()
+                        else {
+                            panic!()
+                        };
+                        assert_eq!(distance_sum, expected);
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn fused_level_keeps_duplicate_discoveries_and_remote_state_correct() {
+        let mut workers = build_workers(20, 4, 2);
+        let worker = &mut workers[0];
+        for _ in 0..2 {
+            worker.start_bfs(0).unwrap();
+            let WorkerResponse::BfsExpanded {
+                discoveries_by_owner,
+                ..
+            } = worker.expand_bfs().unwrap()
+            else {
+                panic!()
+            };
+            assert_eq!(discoveries_by_owner[1].len(), 2);
+            let WorkerResponse::BfsExpanded {
+                discoveries_by_owner,
+                ..
+            } = worker.expand_bfs().unwrap()
+            else {
+                panic!()
+            };
+            assert!(discoveries_by_owner.iter().all(Vec::is_empty));
+            let response = worker
+                .handle(
+                    WorkerCommand::FinishBfsLevel(vec![1, 3, 3]),
+                    &mut tokio::io::sink(),
+                )
+                .await
+                .unwrap();
+            assert!(matches!(
+                response,
+                WorkerResponse::BfsLevelFinished {
+                    accepted: 1,
+                    frontier: 3,
+                    visited: 4
+                }
+            ));
+        }
+        let mut rng = ChaCha8Rng::seed_from_u64(7);
+        assert_eq!(worker.choose_target(&mut rng, 0, 1, &[1, 2], 4), Some(3));
     }
 
     #[test]

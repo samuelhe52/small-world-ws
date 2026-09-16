@@ -43,6 +43,7 @@ pub enum WorkerCommand {
     ApplyDiscoveries(Vec<u32>),
     AdvanceBfs,
     Shutdown,
+    FinishBfsLevel(Vec<u32>),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -96,6 +97,11 @@ pub enum WorkerResponse {
     },
     Ack,
     Error(String),
+    BfsLevelFinished {
+        accepted: u64,
+        frontier: u64,
+        visited: u64,
+    },
 }
 
 pub async fn write_frame<W, T>(writer: &mut W, value: &T) -> io::Result<()>

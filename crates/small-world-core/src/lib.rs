@@ -129,7 +129,7 @@ fn choose_target(
     adjacency: &[HashSet<usize>],
 ) -> Option<usize> {
     let n = adjacency.len();
-    if adjacency[u].len() + 2 >= n {
+    if adjacency[u].len() + 1 >= n {
         return None;
     }
 
@@ -145,17 +145,23 @@ fn choose_target(
     })
 }
 
-fn propose_rewire(
-    task: EdgeTask,
-    probability: f64,
-    seed: u64,
-    adjacency: &[HashSet<usize>],
-) -> Proposal {
+fn propose_rewire(task: EdgeTask, probability: f64, seed: u64, n: usize, k: usize) -> Proposal {
     let mut rng = ChaCha8Rng::seed_from_u64(splitmix64(seed ^ task.index as u64));
     let should_rewire = rng.gen_bool(probability);
-    let target = should_rewire
-        .then(|| choose_target(&mut rng, task.u, task.v, adjacency))
-        .flatten();
+    // Proposals always read the original ring, even when earlier batches have
+    // already committed. This preserves canonical two-phase generation.
+    let eligible = |candidate: usize| {
+        let separation = task.u.abs_diff(candidate);
+        separation.min(n - separation) > k / 2
+    };
+    let target = if should_rewire && k + 1 < n {
+        (0..64)
+            .map(|_| rng.gen_range(0..n))
+            .find(|&v| eligible(v))
+            .or_else(|| (0..n).find(|&v| eligible(v)))
+    } else {
+        None
+    };
     Proposal {
         task,
         should_rewire,
@@ -215,69 +221,64 @@ pub fn generate_ws_partitioned(
 
     let expected_edges = n * k / 2;
     let mut adjacency = vec![HashSet::with_capacity(k + 2); n];
-    let mut tasks = Vec::with_capacity(expected_edges);
 
     for u in 0..n {
         for offset in 1..=k / 2 {
             let v = (u + offset) % n;
             adjacency[u].insert(v);
             adjacency[v].insert(u);
-            tasks.push(EdgeTask {
-                index: tasks.len(),
-                u,
-                v,
-            });
         }
     }
-
-    #[cfg(feature = "parallel")]
-    let proposals: Vec<Proposal> = tasks
-        .par_iter()
-        .map(|&task| propose_rewire(task, p, seed, &adjacency))
-        .collect();
-
-    #[cfg(not(feature = "parallel"))]
-    let proposals: Vec<Proposal> = tasks
-        .iter()
-        .map(|&task| propose_rewire(task, p, seed, &adjacency))
-        .collect();
 
     let mut rewired_edges = 0usize;
     let mut cross_partition_updates = 0usize;
 
-    for proposal in proposals {
-        if !proposal.should_rewire {
-            continue;
-        }
-
-        let EdgeTask { index, u, v } = proposal.task;
-        let valid_proposal = proposal
-            .target
-            .filter(|&w| w != u && w != v && !adjacency[u].contains(&w));
-        let w = if let Some(w) = valid_proposal {
-            w
-        } else {
-            let mut fallback_rng =
-                ChaCha8Rng::seed_from_u64(splitmix64(seed ^ (index as u64) ^ 0xa5a5_a5a5));
-            match choose_target(&mut fallback_rng, u, v, &adjacency) {
-                Some(w) => w,
-                None => continue,
-            }
+    // Bound temporary proposal storage independently of the number of edges.
+    const PROPOSAL_BATCH: usize = 65_536;
+    for start in (0..if p == 0.0 { 0 } else { expected_edges }).step_by(PROPOSAL_BATCH) {
+        let end = (start + PROPOSAL_BATCH).min(expected_edges);
+        let propose = |index| {
+            let u = index / (k / 2);
+            let v = (u + index % (k / 2) + 1) % n;
+            propose_rewire(EdgeTask { index, u, v }, p, seed, n, k)
         };
+        #[cfg(feature = "parallel")]
+        let proposals: Vec<_> = (start..end).into_par_iter().map(propose).collect();
+        #[cfg(not(feature = "parallel"))]
+        let proposals: Vec<_> = (start..end).map(propose).collect();
+        for proposal in proposals {
+            if !proposal.should_rewire {
+                continue;
+            }
 
-        let removed_forward = adjacency[u].remove(&v);
-        let removed_reverse = adjacency[v].remove(&u);
-        let inserted_forward = adjacency[u].insert(w);
-        let inserted_reverse = adjacency[w].insert(u);
-        debug_assert!(removed_forward && removed_reverse);
-        debug_assert!(inserted_forward && inserted_reverse);
-        rewired_edges += 1;
+            let EdgeTask { index, u, v } = proposal.task;
+            let valid_proposal = proposal
+                .target
+                .filter(|&w| w != u && w != v && !adjacency[u].contains(&w));
+            let w = if let Some(w) = valid_proposal {
+                w
+            } else {
+                let mut fallback_rng =
+                    ChaCha8Rng::seed_from_u64(splitmix64(seed ^ (index as u64) ^ 0xa5a5_a5a5));
+                match choose_target(&mut fallback_rng, u, v, &adjacency) {
+                    Some(w) => w,
+                    None => continue,
+                }
+            };
 
-        let source_owner = owner(u, n, partitions);
-        cross_partition_updates += usize::from(owner(v, n, partitions) != source_owner);
-        cross_partition_updates += usize::from(owner(w, n, partitions) != source_owner);
+            let removed_forward = adjacency[u].remove(&v);
+            let removed_reverse = adjacency[v].remove(&u);
+            let inserted_forward = adjacency[u].insert(w);
+            let inserted_reverse = adjacency[w].insert(u);
+            debug_assert!(removed_forward && removed_reverse);
+            debug_assert!(inserted_forward && inserted_reverse);
+            rewired_edges += 1;
+
+            let source_owner = owner(u, n, partitions);
+            cross_partition_updates += usize::from(owner(v, n, partitions) != source_owner);
+            cross_partition_updates += usize::from(owner(w, n, partitions) != source_owner);
+        }
     }
-
     let adjacency = sort_adjacency(adjacency);
 
     let graph = Graph {
@@ -370,9 +371,30 @@ fn local_clustering(graph: &Graph, u: usize) -> f64 {
         return 0.0;
     }
     let mut links = 0usize;
-    for i in 0..neighbors.len() {
-        for &v in &neighbors[i + 1..] {
-            links += usize::from(graph.has_edge(neighbors[i], v));
+    for (i, &v) in neighbors.iter().enumerate() {
+        let tail = &neighbors[i + 1..];
+        let adjacent = graph.neighbors(v);
+        // Binary search wins for short tails; merging removes repeated searches
+        // for larger neighborhoods without penalizing the default sparse graph.
+        if tail.len() <= 16 {
+            links += tail
+                .iter()
+                .filter(|&&w| adjacent.binary_search(&w).is_ok())
+                .count();
+            continue;
+        }
+        let mut j = adjacent.partition_point(|&w| w <= v);
+        let mut t = 0;
+        while t < tail.len() && j < adjacent.len() {
+            match tail[t].cmp(&adjacent[j]) {
+                std::cmp::Ordering::Less => t += 1,
+                std::cmp::Ordering::Greater => j += 1,
+                std::cmp::Ordering::Equal => {
+                    links += 1;
+                    t += 1;
+                    j += 1;
+                }
+            }
         }
     }
     2.0 * links as f64 / (neighbors.len() * (neighbors.len() - 1)) as f64
@@ -404,6 +426,82 @@ pub fn average_clustering_parallel(graph: &Graph) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn batched_generation_is_independent_of_thread_count() {
+        let generate = |threads| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap()
+                .install(|| generate_ws_partitioned(15_000, 10, 0.4, 4, 42).unwrap())
+        };
+        let (sequential, a) = generate(1);
+        let (parallel, b) = generate(4);
+        assert_eq!(sequential.adjacency, parallel.adjacency);
+        assert_eq!(a.rewired_edges, b.rewired_edges);
+        parallel.validate().unwrap();
+    }
+
+    #[test]
+    fn bfs_handles_disconnected_and_repeated_sources() {
+        let graph = Graph {
+            adjacency: vec![vec![1], vec![0, 2], vec![1], vec![]],
+            edge_count: 2,
+        };
+        let sources = [0, 3, 1, 0];
+        for estimate in [
+            sampled_path_length_sequential(&graph, &sources),
+            sampled_path_length_parallel(&graph, &sources),
+        ] {
+            assert_eq!(estimate.reachable_pairs, 6);
+            assert_eq!(estimate.mean_distance, 8.0 / 6.0);
+        }
+        assert_eq!(sampled_path_length_parallel(&graph, &[]).reachable_pairs, 0);
+    }
+
+    #[test]
+    fn clustering_matches_pairwise_reference_on_irregular_graphs() {
+        for (n, k, p) in [(101, 2, 1.0), (200, 30, 0.4), (32, 30, 1.0)] {
+            let (graph, _) = generate_ws_partitioned(n, k, p, 3, 17).unwrap();
+            graph.validate().unwrap();
+            for u in 0..n {
+                let neighbors = graph.neighbors(u);
+                let links: usize = neighbors
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &v)| {
+                        neighbors[i + 1..]
+                            .iter()
+                            .filter(|&&w| graph.has_edge(v, w))
+                            .count()
+                    })
+                    .sum();
+                let expected = if neighbors.len() < 2 {
+                    0.0
+                } else {
+                    2.0 * links as f64 / (neighbors.len() * (neighbors.len() - 1)) as f64
+                };
+                assert_eq!(local_clustering(&graph, u), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn rewiring_can_use_the_last_non_neighbor() {
+        let adjacency = vec![
+            HashSet::from([1, 2]),
+            HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+        ];
+        let mut rng = ChaCha8Rng::seed_from_u64(7);
+        assert_eq!(choose_target(&mut rng, 0, 1, &adjacency), Some(3));
+        let (graph, stats) = generate_ws_partitioned(4, 2, 1.0, 2, 7).unwrap();
+        assert!(stats.rewired_edges > 0);
+        graph.validate().unwrap();
+    }
 
     #[test]
     fn ring_lattice_matches_stage_one_example() {

@@ -206,15 +206,20 @@ fn run_accuracy(args: AccuracyArgs) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
     match cli.command.unwrap_or(Command::Demo(DemoArgs::default())) {
         Command::Demo(args) => run_demo(args),
         Command::Accuracy(args) => run_accuracy(args),
-        Command::Serve(args) => server::serve(&args.host, args.port).await,
+        Command::Serve(args) => tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?
+            .block_on(server::serve(&args.host, args.port)),
         Command::Worker(args) => {
-            distributed::worker::run_worker(args.id).await?;
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?
+                .block_on(distributed::worker::run_worker(args.id))?;
             Ok(())
         }
     }
