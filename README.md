@@ -30,8 +30,9 @@ cargo run --release -- serve
 ```
 
 The default workload is `N=1,000,000`, `K=10`, `p=0.05`, 32 distributed BFS
-sources, and four worker processes. The UI permits up to five million nodes and
-eight workers.
+sources, and up to four worker processes. Node count has no artificial UI or
+application maximum (the transport uses 32-bit node IDs); worker count is
+limited to the processor parallelism reported by the host operating system.
 
 ## What is actually distributed?
 
@@ -67,4 +68,3 @@ The earlier shared-memory Rayon CLI remains available as a comparison baseline:
 cargo run --release -- demo
 cargo run --release -- accuracy --nodes 5000 --samples 100
 ```
-

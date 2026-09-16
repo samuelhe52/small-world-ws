@@ -18,8 +18,10 @@ function PhaseRow({ phase, index }: { phase: PhaseView; index: number }) {
       <div className="phase-meter" aria-label={`${phase.label} progress`}>
         <div style={{ width: `${phase.progress * 100}%` }} />
       </div>
-      <span className="phase-percent">{Math.round(phase.progress * 100)}%</span>
-      <span className="phase-time">{formatDuration(phase.elapsedMs)}</span>
+      <div className="phase-meta">
+        <span className="phase-percent">{Math.round(phase.progress * 100)}%</span>
+        <span className="phase-time">{formatDuration(phase.elapsedMs)}</span>
+      </div>
     </div>
   );
 }
@@ -84,4 +86,3 @@ export function ProgressPanel({ phases, bfs, workers }: Props) {
     </main>
   );
 }
-

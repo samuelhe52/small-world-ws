@@ -1,3 +1,4 @@
+use super::owner;
 use super::protocol::{ClusterConfig, WorkerCommand, WorkerResponse, read_frame, write_frame};
 use futures::future::{join_all, try_join_all};
 use serde::{Deserialize, Serialize};
@@ -10,6 +11,12 @@ use tokio::sync::RwLock;
 use crate::sample_sources;
 
 const CLUSTERING_SAMPLE_LIMIT: usize = 20_000;
+
+pub fn system_worker_limit() -> u32 {
+    std::thread::available_parallelism()
+        .map(|count| count.get().min(u32::MAX as usize) as u32)
+        .unwrap_or(1)
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -29,7 +36,7 @@ impl Default for RunConfig {
             degree: 10,
             probability: 0.05,
             bfs_samples: 32,
-            workers: 4,
+            workers: system_worker_limit().min(4),
             seed: 42,
         }
     }
@@ -37,8 +44,8 @@ impl Default for RunConfig {
 
 impl RunConfig {
     pub fn validate(self) -> Result<Self, String> {
-        if !(10_000..=5_000_000).contains(&self.nodes) {
-            return Err("nodes must be between 10,000 and 5,000,000".to_owned());
+        if self.nodes < 10_000 {
+            return Err("nodes must be at least 10,000".to_owned());
         }
         if self.degree < 2
             || self.degree >= self.nodes
@@ -53,8 +60,11 @@ impl RunConfig {
         if !(1..=256).contains(&self.bfs_samples) {
             return Err("BFS samples must be between 1 and 256".to_owned());
         }
-        if !(2..=8).contains(&self.workers) {
-            return Err("worker processes must be between 2 and 8".to_owned());
+        let worker_limit = system_worker_limit();
+        if self.workers == 0 || self.workers > worker_limit {
+            return Err(format!(
+                "worker processes must be between 1 and {worker_limit} on this system"
+            ));
         }
         Ok(self)
     }
@@ -107,6 +117,7 @@ pub struct RunRecord {
 pub struct DashboardState {
     pub status: &'static str,
     pub workers_online: u32,
+    pub worker_limit: u32,
     pub config: RunConfig,
     pub phases: Vec<PhaseView>,
     pub current_bfs: Option<BfsView>,
@@ -120,6 +131,7 @@ impl Default for DashboardState {
         Self {
             status: "idle",
             workers_online: 0,
+            worker_limit: system_worker_limit(),
             config: RunConfig::default(),
             phases: fresh_phases(),
             current_bfs: None,
@@ -237,10 +249,6 @@ async fn request_all(
             .map(|(worker, command)| worker.request(command)),
     )
     .await
-}
-
-fn owner(node: u32, config: RunConfig) -> usize {
-    (u64::from(node) * u64::from(config.workers) / u64::from(config.nodes)) as usize
 }
 
 async fn begin_phase(state: &SharedDashboardState, key: &str) {
@@ -438,7 +446,7 @@ pub async fn run_distributed(state: SharedDashboardState, config: RunConfig) -> 
     let mut vertices_by_owner = vec![Vec::new(); workers.len()];
     for vertex in clustering_vertices {
         let vertex = vertex as u32;
-        vertices_by_owner[owner(vertex, config)].push(vertex);
+        vertices_by_owner[owner(vertex, config.nodes, config.workers)].push(vertex);
     }
     let mut clustering_sum = 0.0f64;
     let mut clustering_seen = 0u64;
@@ -649,4 +657,38 @@ pub async fn run_distributed(state: SharedDashboardState, config: RunConfig) -> 
 
     join_all(workers.into_iter().map(WorkerClient::shutdown)).await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RunConfig, system_worker_limit};
+
+    #[test]
+    fn accepts_node_counts_above_the_previous_demo_cap() {
+        let config = RunConfig {
+            nodes: 5_000_001,
+            workers: 1,
+            ..RunConfig::default()
+        };
+
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn worker_count_is_limited_by_available_parallelism() {
+        let limit = system_worker_limit();
+        let valid = RunConfig {
+            workers: limit,
+            ..RunConfig::default()
+        };
+        assert!(valid.validate().is_ok());
+
+        if let Some(too_many) = limit.checked_add(1) {
+            let invalid = RunConfig {
+                workers: too_many,
+                ..RunConfig::default()
+            };
+            assert!(invalid.validate().is_err());
+        }
+    }
 }

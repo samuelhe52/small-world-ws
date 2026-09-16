@@ -1,3 +1,4 @@
+use super::owner;
 use super::protocol::{
     ClusterConfig, EdgeQuery, Mutation, WorkerCommand, WorkerResponse, read_frame, write_frame,
 };
@@ -35,10 +36,6 @@ impl Worker {
     fn config(&self) -> Result<ClusterConfig, String> {
         self.config
             .ok_or_else(|| "worker has not built a shard".to_owned())
-    }
-
-    fn owner(node: u32, config: ClusterConfig) -> usize {
-        (u64::from(node) * u64::from(config.workers) / u64::from(config.nodes)) as usize
     }
 
     fn local_index(&self, node: u32) -> Result<usize, String> {
@@ -84,12 +81,13 @@ impl Worker {
         let end =
             (u64::from(config.nodes) * (self.id + 1) as u64 / u64::from(config.workers)) as u32;
         let half = config.degree / 2;
+        let nodes = u64::from(config.nodes);
         let mut adjacency = Vec::with_capacity((end - start) as usize);
         for u in start..end {
             let mut neighbors = Vec::with_capacity(config.degree as usize);
             for offset in 1..=half {
-                neighbors.push((u + offset) % config.nodes);
-                neighbors.push((u + config.nodes - offset) % config.nodes);
+                neighbors.push(((u64::from(u) + u64::from(offset)) % nodes) as u32);
+                neighbors.push(((u64::from(u) + nodes - u64::from(offset)) % nodes) as u32);
             }
             neighbors.sort_unstable();
             neighbors.dedup();
@@ -152,7 +150,7 @@ impl Worker {
 
         for u in self.start..self.end {
             for offset in 1..=half {
-                let v = (u + offset) % config.nodes;
+                let v = ((u64::from(u) + u64::from(offset)) % u64::from(config.nodes)) as u32;
                 let edge_index = u64::from(u) * u64::from(half) + u64::from(offset - 1);
                 let mut rng = ChaCha8Rng::seed_from_u64(Self::splitmix64(seed ^ edge_index));
                 considered += 1;
@@ -186,7 +184,7 @@ impl Worker {
                         add: true,
                     },
                 ] {
-                    let target = Self::owner(mutation.node, config);
+                    let target = owner(mutation.node, config.nodes, config.workers);
                     if target == self.id {
                         self.apply_one_mutation(mutation)?;
                     } else {
@@ -250,7 +248,7 @@ impl Worker {
             for i in 0..neighbors.len() {
                 for &b in &neighbors[i + 1..] {
                     let a = neighbors[i];
-                    queries_by_owner[Self::owner(a, config)].push(EdgeQuery {
+                    queries_by_owner[owner(a, config.nodes, config.workers)].push(EdgeQuery {
                         origin_index: origin_index as u32,
                         a,
                         b,
@@ -281,7 +279,7 @@ impl Worker {
         self.visited.fill(false);
         self.frontier.clear();
         self.next_frontier.clear();
-        if Self::owner(source, config) == self.id {
+        if owner(source, config.nodes, config.workers) == self.id {
             let index = self.local_index(source)?;
             self.visited[index] = true;
             self.frontier.push(source);
@@ -297,7 +295,7 @@ impl Worker {
         for &u in &self.frontier {
             let u_index = self.local_index(u)?;
             for &v in &self.adjacency[u_index] {
-                let target = Self::owner(v, config);
+                let target = owner(v, config.nodes, config.workers);
                 if target == self.id {
                     let index = (v - self.start) as usize;
                     if !self.visited[index] {

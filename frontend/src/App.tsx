@@ -58,6 +58,7 @@ export function App() {
 
   const running = dashboard?.status === "running";
   const effective = running ? dashboard.config : config;
+  const workerLimit = dashboard?.workerLimit ?? Math.max(1, navigator.hardwareConcurrency || 1);
   const error = requestError ?? dashboard?.error;
 
   return (
@@ -76,6 +77,7 @@ export function App() {
       <div className="primary-grid">
         <ConfigurationPanel
           config={effective}
+          workerLimit={workerLimit}
           running={running}
           onChange={setConfig}
           onRun={() => void run()}
@@ -97,4 +99,3 @@ export function App() {
     </div>
   );
 }
-

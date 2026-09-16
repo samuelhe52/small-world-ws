@@ -47,6 +47,7 @@ export interface RunRecord {
 export interface DashboardState {
   status: RunStatus;
   workersOnline: number;
+  workerLimit: number;
   config: RunConfig;
   phases: PhaseView[];
   currentBfs: BfsView | null;
@@ -54,4 +55,3 @@ export interface DashboardState {
   history: RunRecord[];
   error: string | null;
 }
-
