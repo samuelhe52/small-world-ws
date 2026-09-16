@@ -57,7 +57,9 @@ remain interactive. `L` is sampled using the configurable number of uniformly
 chosen source vertices. Both samples are without replacement and deterministic
 for the selected seed.
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for protocol and correctness details.
+See [the distributed architecture](docs/ARCHITECTURE.md) for protocol and
+correctness details. See [the performance audit](docs/PERFORMANCE.md) and the
+[large-scale benchmark](docs/SCALING-BENCHMARK.md) for measurements.
 
 ## Verification
 

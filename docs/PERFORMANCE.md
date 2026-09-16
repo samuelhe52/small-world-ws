@@ -2,7 +2,9 @@
 
 Compared local release builds against `91abdf5` on an Apple M1 Pro with 16 GiB
 RAM, using Rust 1.98.1. Measurements are local observations, not scaling guarantees.
-The compact results are in [design/performance-measurements.json](design/performance-measurements.json).
+The compact results are in [design/performance-measurements.json](../design/performance-measurements.json).
+The larger 5m/10m worker and BFS-sample comparison is in
+[SCALING-BENCHMARK.md](SCALING-BENCHMARK.md).
 
 ## Findings and changes
 
