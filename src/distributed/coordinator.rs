@@ -216,9 +216,20 @@ impl WorkerClient {
     }
 
     async fn request(&mut self, command: WorkerCommand) -> Result<WorkerResponse, String> {
+        self.send(command).await?;
+        self.receive().await
+    }
+
+    // Streaming phases send intermediate batches before their final response.
+    // Route batches only to other workers, keeping this worker's stream unread
+    // by ordinary request/response calls until the summary has been consumed.
+    async fn send(&mut self, command: WorkerCommand) -> Result<(), String> {
         write_frame(&mut self.input, &command)
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| error.to_string())
+    }
+
+    async fn receive(&mut self) -> Result<WorkerResponse, String> {
         let response = read_frame(&mut self.output)
             .await
             .map_err(|error| error.to_string())?
@@ -372,33 +383,36 @@ pub async fn run_distributed(state: SharedDashboardState, config: RunConfig) -> 
     let mut rewired_edges = 0u64;
     let mut cross_shard_messages = 0u64;
     for source_worker in 0..workers.len() {
-        let response = workers[source_worker]
-            .request(WorkerCommand::Rewire {
+        workers[source_worker]
+            .send(WorkerCommand::Rewire {
                 probability: config.probability,
                 seed: config.seed ^ 0x736f_6d65_7073_6575,
             })
             .await?;
-        let WorkerResponse::Rewired {
-            rewired,
-            mutations_by_owner,
-            ..
-        } = response
-        else {
-            return Err("unexpected rewiring response".to_owned());
-        };
-        rewired_edges += rewired;
-        cross_shard_messages += mutations_by_owner
-            .iter()
-            .map(|mutations| mutations.len() as u64)
-            .sum::<u64>();
-        request_all(
-            &mut workers,
-            mutations_by_owner
-                .into_iter()
-                .map(WorkerCommand::ApplyMutations)
-                .collect(),
-        )
-        .await?;
+        loop {
+            match workers[source_worker].receive().await? {
+                WorkerResponse::RewireMutations { target, mutations } => {
+                    let target = target as usize;
+                    if target == source_worker || target >= workers.len() {
+                        return Err("invalid rewiring batch target".to_owned());
+                    }
+                    let expected = mutations.len() as u64;
+                    let response = workers[target]
+                        .request(WorkerCommand::ApplyMutations(mutations))
+                        .await?;
+                    if !matches!(response, WorkerResponse::MutationsApplied { count } if count == expected)
+                    {
+                        return Err("unexpected mutation application response".to_owned());
+                    }
+                    cross_shard_messages += expected;
+                }
+                WorkerResponse::Rewired { rewired, .. } => {
+                    rewired_edges += rewired;
+                    break;
+                }
+                _ => return Err("unexpected rewiring response".to_owned()),
+            }
+        }
         update_phase(
             &state,
             "rewire",
@@ -456,45 +470,53 @@ pub async fn run_distributed(state: SharedDashboardState, config: RunConfig) -> 
         if local_vertices.is_empty() {
             continue;
         }
-        let response = workers[origin]
-            .request(WorkerCommand::PrepareClustering {
+        let mut triangle_counts = vec![0u64; local_vertices.len()];
+        workers[origin]
+            .send(WorkerCommand::PrepareClustering {
                 vertices: local_vertices,
             })
             .await?;
-        let WorkerResponse::ClusteringPrepared {
-            degrees,
-            queries_by_owner,
-        } = response
-        else {
-            return Err("unexpected clustering preparation response".to_owned());
-        };
-        cross_shard_messages += queries_by_owner
-            .iter()
-            .enumerate()
-            .filter(|(target, _)| *target != origin)
-            .map(|(_, queries)| queries.len() as u64)
-            .sum::<u64>();
-        let responses = request_all(
-            &mut workers,
-            queries_by_owner
-                .into_iter()
-                .map(WorkerCommand::ResolveEdgeQueries)
-                .collect(),
-        )
-        .await?;
-        let mut triangle_counts = vec![0u32; degrees.len()];
-        for response in responses {
-            let WorkerResponse::EdgeQueriesResolved { counts } = response else {
-                return Err("unexpected edge-query response".to_owned());
-            };
-            for (index, count) in counts {
-                triangle_counts[index as usize] += count;
+        let degrees = loop {
+            match workers[origin].receive().await? {
+                WorkerResponse::ClusteringQueries { target, queries } => {
+                    let target = target as usize;
+                    if target == origin || target >= workers.len() {
+                        return Err("invalid clustering batch target".to_owned());
+                    }
+                    cross_shard_messages += queries.len() as u64;
+                    let response = workers[target]
+                        .request(WorkerCommand::ResolveEdgeQueries(queries))
+                        .await?;
+                    let WorkerResponse::EdgeQueriesResolved { counts } = response else {
+                        return Err("unexpected edge-query response".to_owned());
+                    };
+                    for (index, count) in counts {
+                        let total = triangle_counts
+                            .get_mut(index as usize)
+                            .ok_or_else(|| "invalid edge-query origin index".to_owned())?;
+                        *total += count;
+                    }
+                }
+                WorkerResponse::ClusteringPrepared {
+                    degrees,
+                    local_counts,
+                } => {
+                    if degrees.len() != triangle_counts.len() || local_counts.len() != degrees.len()
+                    {
+                        return Err("clustering summary count mismatch".to_owned());
+                    }
+                    for (total, local) in triangle_counts.iter_mut().zip(local_counts) {
+                        *total += local;
+                    }
+                    break degrees;
+                }
+                _ => return Err("unexpected clustering preparation response".to_owned()),
             }
-        }
+        };
         for (degree, triangle_count) in degrees.into_iter().zip(triangle_counts) {
             if degree >= 2 {
                 clustering_sum +=
-                    2.0 * f64::from(triangle_count) / f64::from(degree * (degree - 1));
+                    2.0 * triangle_count as f64 / (f64::from(degree) * f64::from(degree - 1));
             }
             clustering_seen += 1;
         }

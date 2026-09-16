@@ -1,12 +1,31 @@
 use super::owner;
 use super::protocol::{
-    ClusterConfig, EdgeQuery, Mutation, WorkerCommand, WorkerResponse, read_frame, write_frame,
+    BATCH_ITEM_LIMIT, ClusterConfig, EdgeQuery, Mutation, WorkerCommand, WorkerResponse,
+    read_frame, write_frame,
 };
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use std::collections::HashMap;
 use std::io;
-use tokio::io::{stdin, stdout};
+use tokio::io::{AsyncRead, AsyncWrite, stdin, stdout};
+
+async fn flush_batches<W, T>(
+    output: &mut W,
+    batches: &mut [Vec<T>],
+    response: impl Fn(u32, Vec<T>) -> WorkerResponse,
+) -> Result<(), String>
+where
+    W: AsyncWrite + Unpin,
+{
+    for (target, batch) in batches.iter_mut().enumerate() {
+        if !batch.is_empty() {
+            write_frame(output, &response(target as u32, std::mem::take(batch)))
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(())
+}
 
 pub struct Worker {
     id: usize,
@@ -141,12 +160,18 @@ impl Worker {
         })
     }
 
-    fn rewire(&mut self, probability: f64, seed: u64) -> Result<WorkerResponse, String> {
+    async fn rewire<W: AsyncWrite + Unpin>(
+        &mut self,
+        probability: f64,
+        seed: u64,
+        output: &mut W,
+    ) -> Result<WorkerResponse, String> {
         let config = self.config()?;
         let mut mutations_by_owner = vec![Vec::new(); config.workers as usize];
         let half = config.degree / 2;
         let mut considered = 0u64;
         let mut rewired = 0u64;
+        let mut queued = 0usize;
 
         for u in self.start..self.end {
             for offset in 1..=half {
@@ -189,16 +214,27 @@ impl Worker {
                         self.apply_one_mutation(mutation)?;
                     } else {
                         mutations_by_owner[target].push(mutation);
+                        queued += 1;
+                        if queued == BATCH_ITEM_LIMIT {
+                            flush_batches(output, &mut mutations_by_owner, |target, mutations| {
+                                WorkerResponse::RewireMutations { target, mutations }
+                            })
+                            .await?;
+                            queued = 0;
+                        }
                     }
                 }
                 rewired += 1;
             }
         }
 
+        flush_batches(output, &mut mutations_by_owner, |target, mutations| {
+            WorkerResponse::RewireMutations { target, mutations }
+        })
+        .await?;
         Ok(WorkerResponse::Rewired {
             considered,
             rewired,
-            mutations_by_owner,
         })
     }
 
@@ -237,33 +273,58 @@ impl Worker {
         }
     }
 
-    fn prepare_clustering(&self, vertices: Vec<u32>) -> Result<WorkerResponse, String> {
+    async fn prepare_clustering<W: AsyncWrite + Unpin>(
+        &self,
+        vertices: Vec<u32>,
+        output: &mut W,
+    ) -> Result<WorkerResponse, String> {
         let config = self.config()?;
         let mut degrees = Vec::with_capacity(vertices.len());
         let mut queries_by_owner = vec![Vec::new(); config.workers as usize];
+        let mut local_counts = Vec::with_capacity(vertices.len());
+        let mut queued = 0usize;
 
         for (origin_index, u) in vertices.into_iter().enumerate() {
             let neighbors = &self.adjacency[self.local_index(u)?];
             degrees.push(neighbors.len() as u32);
+            let mut local_count = 0u64;
             for i in 0..neighbors.len() {
                 for &b in &neighbors[i + 1..] {
                     let a = neighbors[i];
-                    queries_by_owner[owner(a, config.nodes, config.workers)].push(EdgeQuery {
+                    let target = owner(a, config.nodes, config.workers);
+                    if target == self.id {
+                        local_count += u64::from(self.contains_edge(a, b)?);
+                        continue;
+                    }
+                    queries_by_owner[target].push(EdgeQuery {
                         origin_index: origin_index as u32,
                         a,
                         b,
                     });
+                    queued += 1;
+                    if queued == BATCH_ITEM_LIMIT {
+                        flush_batches(output, &mut queries_by_owner, |target, queries| {
+                            WorkerResponse::ClusteringQueries { target, queries }
+                        })
+                        .await?;
+                        queued = 0;
+                    }
                 }
             }
+            local_counts.push(local_count);
         }
+        flush_batches(output, &mut queries_by_owner, |target, queries| {
+            WorkerResponse::ClusteringQueries { target, queries }
+        })
+        .await?;
         Ok(WorkerResponse::ClusteringPrepared {
             degrees,
-            queries_by_owner,
+            local_counts,
         })
     }
 
     fn resolve_edge_queries(&self, queries: Vec<EdgeQuery>) -> Result<WorkerResponse, String> {
-        let mut counts = HashMap::<u32, u32>::new();
+        let mut counts = HashMap::<u32, u64>::new();
         for query in queries {
             if self.contains_edge(query.a, query.b)? {
                 *counts.entry(query.origin_index).or_default() += 1;
@@ -340,13 +401,21 @@ impl Worker {
         }
     }
 
-    fn handle(&mut self, command: WorkerCommand) -> Result<WorkerResponse, String> {
+    async fn handle<W: AsyncWrite + Unpin>(
+        &mut self,
+        command: WorkerCommand,
+        output: &mut W,
+    ) -> Result<WorkerResponse, String> {
         match command {
             WorkerCommand::Build(config) => self.build(config),
-            WorkerCommand::Rewire { probability, seed } => self.rewire(probability, seed),
+            WorkerCommand::Rewire { probability, seed } => {
+                self.rewire(probability, seed, output).await
+            }
             WorkerCommand::ApplyMutations(mutations) => self.apply_mutations(mutations),
             WorkerCommand::GraphStats => Ok(self.graph_stats()),
-            WorkerCommand::PrepareClustering { vertices } => self.prepare_clustering(vertices),
+            WorkerCommand::PrepareClustering { vertices } => {
+                self.prepare_clustering(vertices, output).await
+            }
             WorkerCommand::ResolveEdgeQueries(queries) => self.resolve_edge_queries(queries),
             WorkerCommand::StartBfs { source } => self.start_bfs(source),
             WorkerCommand::ExpandBfs => self.expand_bfs(),
@@ -358,17 +427,251 @@ impl Worker {
 }
 
 pub async fn run_worker(id: usize) -> io::Result<()> {
-    let mut worker = Worker::new(id);
-    let mut input = stdin();
-    let mut output = stdout();
+    run_worker_stream(id, &mut stdin(), &mut stdout()).await
+}
 
-    while let Some(command) = read_frame::<_, WorkerCommand>(&mut input).await? {
+async fn run_worker_stream<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    id: usize,
+    input: &mut R,
+    output: &mut W,
+) -> io::Result<()> {
+    let mut worker = Worker::new(id);
+
+    while let Some(command) = read_frame::<_, WorkerCommand>(input).await? {
         let shutdown = matches!(command, WorkerCommand::Shutdown);
-        let response = worker.handle(command).unwrap_or_else(WorkerResponse::Error);
-        write_frame(&mut output, &response).await?;
+        let response = worker
+            .handle(command, output)
+            .await
+            .unwrap_or_else(WorkerResponse::Error);
+        write_frame(output, &response).await?;
         if shutdown {
             break;
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::protocol::MAX_FRAME_BYTES;
+    use super::*;
+
+    fn build_workers(nodes: u32, degree: u32, count: u32) -> Vec<Worker> {
+        (0..count as usize)
+            .map(|id| {
+                let mut worker = Worker::new(id);
+                worker
+                    .build(ClusterConfig {
+                        nodes,
+                        degree,
+                        workers: count,
+                        seed: 42,
+                    })
+                    .unwrap();
+                worker
+            })
+            .collect()
+    }
+
+    fn assert_batch_frame(response: &WorkerResponse, items: usize) {
+        assert!((1..=BATCH_ITEM_LIMIT).contains(&items));
+        let size = bincode::serialized_size(response).unwrap() as usize;
+        assert!(size < 1024 * 1024);
+        assert!(size < MAX_FRAME_BYTES);
+    }
+
+    #[tokio::test]
+    async fn rewiring_streams_bounded_mutations_and_preserves_graph() {
+        let nodes = 4096;
+        let degree = 100;
+        let mut workers = build_workers(nodes, degree, 3);
+        let mut batches = 0;
+        let mut routed = 0u64;
+        let mut total_rewired = 0u64;
+        for origin in 0..workers.len() {
+            let mut source = workers.remove(origin);
+            let expected_considered = u64::from(source.end - source.start) * u64::from(degree / 2);
+            // A small pipe forces backpressure while the consumer routes batches.
+            let (mut output, mut input) = tokio::io::duplex(4096);
+            let produce = async {
+                let summary = source.rewire(1.0, 42, &mut output).await.unwrap();
+                write_frame(&mut output, &summary).await.unwrap();
+            };
+            let consume = async {
+                loop {
+                    let response = read_frame::<_, WorkerResponse>(&mut input)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    match &response {
+                        WorkerResponse::RewireMutations { target, mutations } => {
+                            assert_ne!(*target as usize, origin);
+                            assert_batch_frame(&response, mutations.len());
+                            batches += 1;
+                            routed += mutations.len() as u64;
+                            let index = *target as usize - usize::from(*target as usize > origin);
+                            workers[index].apply_mutations(mutations.clone()).unwrap();
+                        }
+                        WorkerResponse::Rewired {
+                            considered,
+                            rewired,
+                        } => {
+                            assert_eq!(*considered, expected_considered);
+                            total_rewired += rewired;
+                            break;
+                        }
+                        _ => panic!("unexpected response: {response:?}"),
+                    }
+                }
+            };
+            tokio::join!(produce, consume);
+            workers.insert(origin, source);
+        }
+        assert!(routed > BATCH_ITEM_LIMIT as u64);
+        assert!(batches > workers.len());
+        assert_eq!(total_rewired, u64::from(nodes) * u64::from(degree / 2));
+        let mut entries = 0u64;
+        for worker in &workers {
+            for (index, neighbors) in worker.adjacency.iter().enumerate() {
+                let u = worker.start + index as u32;
+                assert!(neighbors.windows(2).all(|pair| pair[0] < pair[1]));
+                entries += neighbors.len() as u64;
+                for &v in neighbors {
+                    assert_ne!(u, v);
+                    assert!(
+                        workers[owner(v, nodes, workers.len() as u32)]
+                            .contains_edge(v, u)
+                            .unwrap()
+                    );
+                }
+            }
+        }
+        assert_eq!(entries, u64::from(nodes) * u64::from(degree));
+    }
+
+    #[tokio::test]
+    async fn clustering_aggregates_bounded_query_batches_across_owners() {
+        let workers = build_workers(512, 100, 3);
+        let mut batches = 0;
+        let mut remote_queries = 0;
+        for source in &workers {
+            let vertices: Vec<_> = (source.start..source.end).collect();
+            let mut totals = vec![0u64; vertices.len()];
+            let (mut output, mut input) = tokio::io::duplex(4096);
+            let produce = async {
+                let summary = source
+                    .prepare_clustering(vertices, &mut output)
+                    .await
+                    .unwrap();
+                write_frame(&mut output, &summary).await.unwrap();
+            };
+            let consume = async {
+                loop {
+                    let response = read_frame::<_, WorkerResponse>(&mut input)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    match &response {
+                        WorkerResponse::ClusteringQueries { target, queries } => {
+                            assert_ne!(*target as usize, source.id);
+                            assert_batch_frame(&response, queries.len());
+                            batches += 1;
+                            remote_queries += queries.len();
+                            let WorkerResponse::EdgeQueriesResolved { counts } = workers
+                                [*target as usize]
+                                .resolve_edge_queries(queries.clone())
+                                .unwrap()
+                            else {
+                                panic!("unexpected resolution response")
+                            };
+                            for (index, count) in counts {
+                                totals[index as usize] += count;
+                            }
+                        }
+                        WorkerResponse::ClusteringPrepared {
+                            degrees,
+                            local_counts,
+                        } => {
+                            assert_eq!(degrees, &vec![100; totals.len()]);
+                            for (total, local) in totals.iter_mut().zip(local_counts) {
+                                *total += local;
+                            }
+                            break;
+                        }
+                        _ => panic!("unexpected response: {response:?}"),
+                    }
+                }
+            };
+            tokio::join!(produce, consume);
+            // Ring-lattice K=100 has 3*K*(K-2)/8 neighbor-neighbor links.
+            assert!(totals.iter().all(|&count| count == 3675));
+        }
+        assert!(remote_queries > BATCH_ITEM_LIMIT);
+        assert!(batches > workers.len());
+    }
+
+    #[tokio::test]
+    async fn reported_single_worker_clustering_run_fits_and_keeps_stream_open() {
+        let (client, server) = tokio::io::duplex(4096);
+        let (mut input, mut output) = tokio::io::split(server);
+        let worker =
+            tokio::spawn(async move { run_worker_stream(0, &mut input, &mut output).await });
+        let (mut input, mut output) = tokio::io::split(client);
+        write_frame(
+            &mut output,
+            &WorkerCommand::Build(ClusterConfig {
+                nodes: 10_000,
+                degree: 100,
+                workers: 1,
+                seed: 42,
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            read_frame::<_, WorkerResponse>(&mut input).await.unwrap(),
+            Some(WorkerResponse::Built { .. })
+        ));
+        write_frame(
+            &mut output,
+            &WorkerCommand::PrepareClustering {
+                vertices: (0..10_000).collect(),
+            },
+        )
+        .await
+        .unwrap();
+        // All 49.5 million pairs are resolved locally: only a small summary is sent.
+        let response = read_frame::<_, WorkerResponse>(&mut input)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(bincode::serialized_size(&response).unwrap() < MAX_FRAME_BYTES as u64);
+        let WorkerResponse::ClusteringPrepared {
+            degrees,
+            local_counts,
+        } = response
+        else {
+            panic!("expected summary without local query frames")
+        };
+        assert_eq!(degrees, vec![100; 10_000]);
+        assert_eq!(local_counts, vec![3675; 10_000]);
+        write_frame(&mut output, &WorkerCommand::GraphStats)
+            .await
+            .unwrap();
+        assert!(matches!(
+            read_frame::<_, WorkerResponse>(&mut input).await.unwrap(),
+            Some(WorkerResponse::GraphStats {
+                adjacency_entries: 1_000_000,
+                ..
+            })
+        ));
+        write_frame(&mut output, &WorkerCommand::Shutdown)
+            .await
+            .unwrap();
+        assert!(matches!(
+            read_frame::<_, WorkerResponse>(&mut input).await.unwrap(),
+            Some(WorkerResponse::Ack)
+        ));
+        worker.await.unwrap().unwrap();
+    }
 }

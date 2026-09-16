@@ -3,6 +3,9 @@ use std::io;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 pub const MAX_FRAME_BYTES: usize = 256 * 1024 * 1024;
+// Bound the total queued items, not each owner's queue. Even the larger
+// EdgeQuery frames stay below 1 MiB with bincode's fixed-width encoding.
+pub const BATCH_ITEM_LIMIT: usize = 65_536;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct ClusterConfig {
@@ -50,7 +53,10 @@ pub enum WorkerResponse {
     Rewired {
         considered: u64,
         rewired: u64,
-        mutations_by_owner: Vec<Vec<Mutation>>,
+    },
+    RewireMutations {
+        target: u32,
+        mutations: Vec<Mutation>,
     },
     MutationsApplied {
         count: u64,
@@ -61,10 +67,14 @@ pub enum WorkerResponse {
     },
     ClusteringPrepared {
         degrees: Vec<u32>,
-        queries_by_owner: Vec<Vec<EdgeQuery>>,
+        local_counts: Vec<u64>,
+    },
+    ClusteringQueries {
+        target: u32,
+        queries: Vec<EdgeQuery>,
     },
     EdgeQueriesResolved {
-        counts: Vec<(u32, u32)>,
+        counts: Vec<(u32, u64)>,
     },
     BfsStarted,
     BfsExpanded {
@@ -121,4 +131,50 @@ where
     let value = bincode::deserialize(&payload)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     Ok(Some(value))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn full_batches_and_their_replies_fit_well_below_the_frame_limit() {
+        let queries = vec![
+            EdgeQuery {
+                origin_index: 0,
+                a: 1,
+                b: 2
+            };
+            BATCH_ITEM_LIMIT
+        ];
+        let mutations = vec![
+            Mutation {
+                node: 1,
+                other: 2,
+                add: true
+            };
+            BATCH_ITEM_LIMIT
+        ];
+        let sizes = [
+            bincode::serialized_size(&WorkerCommand::ResolveEdgeQueries(queries.clone())).unwrap(),
+            bincode::serialized_size(&WorkerResponse::ClusteringQueries { target: 1, queries })
+                .unwrap(),
+            bincode::serialized_size(&WorkerCommand::ApplyMutations(mutations.clone())).unwrap(),
+            bincode::serialized_size(&WorkerResponse::RewireMutations {
+                target: 1,
+                mutations,
+            })
+            .unwrap(),
+            bincode::serialized_size(&WorkerResponse::EdgeQueriesResolved {
+                counts: (0..BATCH_ITEM_LIMIT as u32)
+                    .map(|index| (index, u64::MAX))
+                    .collect(),
+            })
+            .unwrap(),
+        ];
+        for size in sizes {
+            assert!(size < 1024 * 1024);
+            assert!(size < MAX_FRAME_BYTES as u64);
+        }
+    }
 }
