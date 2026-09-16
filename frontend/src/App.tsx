@@ -1,0 +1,100 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+import { getStatus, startRun } from "./api";
+import { ConfigurationPanel } from "./components/ConfigurationPanel";
+import { ProgressPanel } from "./components/ProgressPanel";
+import { ResultsChart } from "./components/ResultsChart";
+import { ResultsPanel } from "./components/ResultsPanel";
+import { RunHistory } from "./components/RunHistory";
+import type { DashboardState, RunConfig } from "./types";
+
+const DEFAULT_CONFIG: RunConfig = {
+  nodes: 1_000_000,
+  degree: 10,
+  probability: 0.05,
+  bfsSamples: 32,
+  workers: 4,
+  seed: 42,
+};
+
+export function App() {
+  const [dashboard, setDashboard] = useState<DashboardState | null>(null);
+  const [config, setConfig] = useState<RunConfig>(DEFAULT_CONFIG);
+  const [requestError, setRequestError] = useState<string | null>(null);
+  const hydrated = useRef(false);
+
+  const refresh = useCallback(async (signal?: AbortSignal) => {
+    try {
+      const next = await getStatus(signal);
+      setDashboard(next);
+      if (!hydrated.current) {
+        setConfig(next.config);
+        hydrated.current = true;
+      }
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      setRequestError(error instanceof Error ? error.message : String(error));
+    }
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void refresh(controller.signal);
+    const timer = window.setInterval(() => void refresh(), 400);
+    return () => {
+      controller.abort();
+      window.clearInterval(timer);
+    };
+  }, [refresh]);
+
+  const run = async () => {
+    setRequestError(null);
+    try {
+      await startRun(config);
+      await refresh();
+    } catch (error) {
+      setRequestError(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const running = dashboard?.status === "running";
+  const effective = running ? dashboard.config : config;
+  const error = requestError ?? dashboard?.error;
+
+  return (
+    <div className="app-shell">
+      <header className="app-header">
+        <div className="brand-group">
+          <h1>Small World Lab</h1>
+          <span>Distributed experiment console</span>
+        </div>
+        <div className="connection-status">
+          <i className={dashboard?.workersOnline ? "online" : ""} />
+          {dashboard?.workersOnline ?? 0} workers online
+        </div>
+      </header>
+      {error ? <div className="error-banner" role="alert">{error}</div> : null}
+      <div className="primary-grid">
+        <ConfigurationPanel
+          config={effective}
+          running={running}
+          onChange={setConfig}
+          onRun={() => void run()}
+        />
+        <ProgressPanel
+          phases={dashboard?.phases ?? []}
+          bfs={dashboard?.currentBfs ?? null}
+          workers={effective.workers}
+        />
+        <ResultsPanel results={dashboard?.results ?? null} config={effective} />
+      </div>
+      <div className="secondary-grid">
+        <ResultsChart history={dashboard?.history ?? []} />
+        <RunHistory history={dashboard?.history ?? []} />
+      </div>
+      <footer>
+        Graph adjacency lives only inside worker processes; the coordinator routes protocol messages and stores progress metadata.
+      </footer>
+    </div>
+  );
+}
+
