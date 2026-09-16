@@ -1,6 +1,6 @@
 use clap::{Args, Parser, Subcommand};
 use rayon::ThreadPoolBuilder;
-use small_world_ws::{
+use small_world_core::{
     average_clustering_parallel, exact_path_length, generate_ws_partitioned, sample_sources,
     sampled_path_length_parallel, sampled_path_length_sequential,
 };

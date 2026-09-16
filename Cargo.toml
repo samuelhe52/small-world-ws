@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "crates/small-world-core"]
+resolver = "3"
+
 [package]
 name = "small-world-ws"
 version = "0.1.0"
@@ -13,6 +17,7 @@ rand_chacha = "0.3"
 rayon = "1.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+small-world-core = { path = "crates/small-world-core" }
 tokio = { version = "1", features = ["full"] }
 tower-http = { version = "0.6", features = ["fs"] }
 

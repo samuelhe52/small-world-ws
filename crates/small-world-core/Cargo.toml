@@ -1,0 +1,13 @@
+[package]
+name = "small-world-core"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["parallel"]
+parallel = ["dep:rayon"]
+
+[dependencies]
+rand = { version = "0.8", default-features = false, features = ["alloc"] }
+rand_chacha = { version = "0.3", default-features = false }
+rayon = { version = "1.10", optional = true }

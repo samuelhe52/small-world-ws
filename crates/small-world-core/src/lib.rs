@@ -1,5 +1,6 @@
 use rand::{Rng, SeedableRng, seq::index::sample};
 use rand_chacha::ChaCha8Rng;
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use std::collections::{HashSet, VecDeque};
 use std::fmt;
@@ -144,6 +145,50 @@ fn choose_target(
     })
 }
 
+fn propose_rewire(
+    task: EdgeTask,
+    probability: f64,
+    seed: u64,
+    adjacency: &[HashSet<usize>],
+) -> Proposal {
+    let mut rng = ChaCha8Rng::seed_from_u64(splitmix64(seed ^ task.index as u64));
+    let should_rewire = rng.gen_bool(probability);
+    let target = should_rewire
+        .then(|| choose_target(&mut rng, task.u, task.v, adjacency))
+        .flatten();
+    Proposal {
+        task,
+        should_rewire,
+        target,
+    }
+}
+
+fn sort_adjacency(adjacency: Vec<HashSet<usize>>) -> Vec<Vec<usize>> {
+    #[cfg(feature = "parallel")]
+    {
+        adjacency
+            .into_par_iter()
+            .map(|neighbors| {
+                let mut neighbors: Vec<_> = neighbors.into_iter().collect();
+                neighbors.sort_unstable();
+                neighbors
+            })
+            .collect()
+    }
+
+    #[cfg(not(feature = "parallel"))]
+    {
+        adjacency
+            .into_iter()
+            .map(|neighbors| {
+                let mut neighbors: Vec<_> = neighbors.into_iter().collect();
+                neighbors.sort_unstable();
+                neighbors
+            })
+            .collect()
+    }
+}
+
 /// Generates a Watts-Strogatz graph through a two-phase, partition-aware model.
 /// Logical partitions produce independent proposals in parallel. A coordinator
 /// commits them in canonical edge order so loop, duplicate, and edge-count
@@ -185,21 +230,16 @@ pub fn generate_ws_partitioned(
         }
     }
 
-    let original = &adjacency;
+    #[cfg(feature = "parallel")]
     let proposals: Vec<Proposal> = tasks
         .par_iter()
-        .map(|&task| {
-            let mut rng = ChaCha8Rng::seed_from_u64(splitmix64(seed ^ task.index as u64));
-            let should_rewire = rng.gen_bool(p);
-            let target = should_rewire
-                .then(|| choose_target(&mut rng, task.u, task.v, original))
-                .flatten();
-            Proposal {
-                task,
-                should_rewire,
-                target,
-            }
-        })
+        .map(|&task| propose_rewire(task, p, seed, &adjacency))
+        .collect();
+
+    #[cfg(not(feature = "parallel"))]
+    let proposals: Vec<Proposal> = tasks
+        .iter()
+        .map(|&task| propose_rewire(task, p, seed, &adjacency))
         .collect();
 
     let mut rewired_edges = 0usize;
@@ -238,14 +278,7 @@ pub fn generate_ws_partitioned(
         cross_partition_updates += usize::from(owner(w, n, partitions) != source_owner);
     }
 
-    let adjacency: Vec<Vec<usize>> = adjacency
-        .into_par_iter()
-        .map(|neighbors| {
-            let mut neighbors: Vec<_> = neighbors.into_iter().collect();
-            neighbors.sort_unstable();
-            neighbors
-        })
-        .collect();
+    let adjacency = sort_adjacency(adjacency);
 
     let graph = Graph {
         adjacency,
@@ -310,12 +343,20 @@ pub fn sampled_path_length_sequential(graph: &Graph, sources: &[usize]) -> PathE
 }
 
 pub fn sampled_path_length_parallel(graph: &Graph, sources: &[usize]) -> PathEstimate {
-    finish_path_estimate(
-        sources
-            .par_iter()
-            .map(|&source| bfs_totals(graph, source))
-            .reduce(|| (0u64, 0u64), |a, b| (a.0 + b.0, a.1 + b.1)),
-    )
+    #[cfg(feature = "parallel")]
+    {
+        finish_path_estimate(
+            sources
+                .par_iter()
+                .map(|&source| bfs_totals(graph, source))
+                .reduce(|| (0u64, 0u64), |a, b| (a.0 + b.0, a.1 + b.1)),
+        )
+    }
+
+    #[cfg(not(feature = "parallel"))]
+    {
+        sampled_path_length_sequential(graph, sources)
+    }
 }
 
 pub fn exact_path_length(graph: &Graph) -> PathEstimate {
@@ -341,11 +382,23 @@ pub fn average_clustering_parallel(graph: &Graph) -> f64 {
     if graph.node_count() == 0 {
         return 0.0;
     }
-    (0..graph.node_count())
-        .into_par_iter()
-        .map(|u| local_clustering(graph, u))
-        .sum::<f64>()
-        / graph.node_count() as f64
+
+    #[cfg(feature = "parallel")]
+    {
+        (0..graph.node_count())
+            .into_par_iter()
+            .map(|u| local_clustering(graph, u))
+            .sum::<f64>()
+            / graph.node_count() as f64
+    }
+
+    #[cfg(not(feature = "parallel"))]
+    {
+        (0..graph.node_count())
+            .map(|u| local_clustering(graph, u))
+            .sum::<f64>()
+            / graph.node_count() as f64
+    }
 }
 
 #[cfg(test)]

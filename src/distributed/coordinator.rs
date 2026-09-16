@@ -8,7 +8,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::RwLock;
 
-use crate::sample_sources;
+use small_world_core::sample_sources;
 
 const CLUSTERING_SAMPLE_LIMIT: usize = 20_000;
 

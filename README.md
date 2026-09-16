@@ -5,6 +5,10 @@ Watts-Strogatz experiment. A Rust coordinator launches separate worker
 processes. Each worker stores adjacency lists only for its assigned node range;
 the coordinator stores progress metadata but no graph adjacency.
 
+The reusable graph algorithms live in the `small-world-core` workspace crate.
+The native application owns the HTTP server and distributed worker runtime, so
+the core can later be wrapped independently for WebAssembly.
+
 The dashboard lets you tune `N`, `K`, rewiring probability `p`, BFS sample
 count, and worker-process count. It displays live construction, rewiring,
 clustering, and distributed BFS progress, followed by `L`, `C`, run details,
