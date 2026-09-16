@@ -1,18 +1,19 @@
 # Small World Lab
 
-Small World Lab is a browser-based demo of a genuinely partitioned
-Watts-Strogatz experiment. A Rust coordinator launches separate worker
-processes. Each worker stores adjacency lists only for its assigned node range;
-the coordinator stores progress metadata but no graph adjacency.
+Small World Lab is a browser demo of a partitioned Watts-Strogatz experiment. A
+Rust coordinator launches separate worker processes. Each worker stores
+adjacency lists only for its assigned node range. The coordinator stores
+progress metadata and no graph adjacency.
 
 The reusable graph algorithms live in the `small-world-core` workspace crate.
 The native application owns the HTTP server and distributed worker runtime, so
 the core can later be wrapped independently for WebAssembly.
 
-The dashboard lets you tune `N`, `K`, rewiring probability `p`, BFS sample
-count, and worker-process count. It displays live construction, rewiring,
-clustering, and distributed BFS progress, followed by `L`, `C`, run details,
-and a history chart.
+The dashboard lets you tune `N` (the number of nodes), `K` (the degree of each
+node), `p` (the rewiring probability), the number of BFS samples, and the
+number of worker processes. It displays live progress for construction,
+rewiring, clustering, and distributed BFS. It then shows `L` (average path
+length), `C` (clustering coefficient), run details, and a history chart.
 
 ## Start the dashboard
 

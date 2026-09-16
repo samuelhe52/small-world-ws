@@ -2,11 +2,11 @@
 
 ## Process and storage model
 
-The `serve` process has three responsibilities: HTTP API/static frontend,
-experiment coordination, and progress aggregation. It launches `W` instances of
-the same executable using the hidden `worker --id i` command.
+The `serve` process launches `W` worker processes. It serves the HTTP API and
+static frontend, coordinates experiments, and collects progress. Each worker
+runs the hidden `worker --id i` command, where `i` identifies the worker.
 
-For `N` nodes, worker `i` owns the half-open range
+For a graph with `N` nodes and degree `K`, worker `i` owns the half-open range
 
 ```text
 [floor(N * i / W), floor(N * (i + 1) / W))
@@ -17,18 +17,19 @@ global. The coordinator never receives the adjacency lists. Worker requests and
 responses are serialized with `bincode` and sent as length-prefixed frames over
 the workers' stdin/stdout pipes.
 
-This is local multi-process distribution: storage is genuinely sharded across
-isolated address spaces, while transport is local IPC rather than multiple
-physical hosts. Replacing pipes with TCP does not change the ownership or
-algorithm protocols described below.
+Each worker stores part of the graph in its own address space. The workers
+communicate through local pipes rather than across physical hosts. Replacing
+pipes with TCP would preserve the ownership and algorithm protocols described
+below.
 
 ## Distributed WS construction and rewiring
 
 Initial ring construction requires no communication. Every worker can derive
 the `K/2` left and right neighbors of each locally owned node from `N` and `K`.
 
-Rewiring uses the standard canonical clockwise edges `(u, u+d)` for
-`d=1..K/2`. Shards take turns as the authoritative rewiring shard:
+Rewiring uses canonical clockwise edges `(u, u+d)`, where `u` is the fixed
+endpoint and `d` ranges from 1 through `K/2`. Shards take turns as the
+authoritative rewiring shard:
 
 1. The active worker processes every canonical edge whose fixed endpoint `u`
    it owns.
@@ -47,10 +48,12 @@ invariant `sum(degrees) = N*K`.
 
 ## Distributed clustering coefficient
 
-At large `N`, the demo samples up to 20,000 vertices uniformly without
-replacement. For each sampled vertex `u`, its owner enumerates all unordered
-neighbor pairs `(a,b)`. Checking whether `(a,b)` exists is routed to `owner(a)`,
-the only process that stores `adj[a]`.
+The dashboard reports `C`, the average clustering coefficient. The demo
+estimates `C` by sampling up to 20,000 vertices uniformly without replacement.
+When `N` is 20,000 or less, it uses every vertex. For each sampled vertex `u`,
+its owner enumerates all unordered neighbor pairs `(a,b)`. If `a` belongs to a
+different worker, the coordinator routes the query to `owner(a)`, the only
+process that stores `adj[a]`.
 
 Target workers aggregate successful queries by sampled-vertex index. The
 coordinator combines counts and computes
@@ -64,7 +67,8 @@ presenting it as an exact all-vertex result.
 
 ## Level-synchronous distributed BFS
 
-For rewired graphs, every sampled source runs one collective BFS across all workers:
+For rewired graphs, where `p` is greater than zero, every sampled source runs a
+BFS across all workers:
 
 ```text
 start source
@@ -85,16 +89,17 @@ It never reads another worker's adjacency. The coordinator sums accepted
 discoveries at level `d` to accumulate the distance contribution `d * count`.
 When every worker reports an empty next frontier, that source is complete.
 
-Sources are uniform samples without replacement. They execute sequentially
-because every BFS uses the full worker cluster; the expensive expansion inside
-each level runs concurrently in all worker processes.
+Sources are uniform samples without replacement. They run one at a time because
+each BFS uses every worker. The expansion for each level runs concurrently in
+all worker processes.
 
-For `p=0`, workers compute exact distances from each sampled source to their own
-vertices in the intact ring: `ceil(min(|u-s|, N-|u-s|) / (K/2))`. This preserves
-the sampled sources, distance denominator, and worker ownership, while avoiding
-one synchronization round per ring level. Workers reject this shortcut after
-their adjacency has been mutated. The dashboard labels this as exact ring
-distances rather than displaying a simulated BFS frontier.
+The dashboard reports `L`, the average path length. For `p=0`, workers compute
+exact distances from each sampled source to their own vertices in the intact
+ring: `ceil(min(|u-s|, N-|u-s|) / (K/2))`. This keeps the same sampled sources,
+distance denominator, and worker ownership while avoiding one synchronization
+round per ring level. Workers reject this shortcut after their adjacency has
+been mutated. The dashboard labels this as exact ring distances and does not
+show a simulated BFS frontier.
 
 ## Dashboard and progress
 
